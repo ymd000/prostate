@@ -1,0 +1,9 @@
+train/
+validation/
+inputs/
+report/
+tmp/
+out/
+
+weights
+tmp.*

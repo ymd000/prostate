@@ -1,9 +1,33 @@
-train/
-validation/
-inputs/
-report/
-tmp/
-out/
+# Python environments and caches
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+*.egg-info/
+/build/
+/dist/
+.ipynb_checkpoints/
 
-weights
-tmp.*
+# Local configuration
+.env
+.env.*
+!.env.example
+
+# Datasets and generated artifacts
+/data/*
+!/data/.gitkeep
+/inputs/
+/outputs
+/weights/
+/reports/
+/runs/
+/tmp/
+
+# Editors and OS files
+.DS_Store
+.idea/
+.vscode/
