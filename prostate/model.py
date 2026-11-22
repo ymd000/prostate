@@ -1,4 +1,4 @@
-"""A four-level U-Net trained from scratch, without external weight downloads."""
+"""U-Net baseline and an upsampling decoder for frozen GigaPath-Flash tokens."""
 
 import torch
 from torch import nn
@@ -60,3 +60,34 @@ class UNet(nn.Module):
                 )
             features = decoder(torch.cat((skip, features), dim=1))
         return self.head(features)
+
+
+class TokenDecoder(nn.Module):
+    """Upsampling decoder that takes gigapath-flash patch tokens as input.
+
+    Input:  (B, TOKEN_DIM, grid, grid)  e.g. (B, 384, 16, 16) for 256×256 patches
+    Output: (B, num_classes, H, W)      e.g. (B, 5, 256, 256)
+    """
+
+    TOKEN_DIM = 384
+
+    def __init__(self, num_classes: int = 5, base_channels: int = 32, normalization: str = "group"):
+        super().__init__()
+        if num_classes < 2 or base_channels < 1:
+            raise ValueError("num_classes >= 2 and base_channels >= 1 are required")
+        # channel schedule: TOKEN_DIM → 256 → 128 → 64 → 32
+        channels = [base_channels * 2**i for i in range(4)]  # [32, 64, 128, 256]
+        in_ch = [self.TOKEN_DIM] + list(reversed(channels[1:]))  # [384, 256, 128, 64]
+        out_ch = list(reversed(channels))  # [256, 128, 64, 32]
+        self.upsamples = nn.ModuleList(
+            nn.ConvTranspose2d(ic, oc, 2, stride=2) for ic, oc in zip(in_ch, out_ch)
+        )
+        self.decoders = nn.ModuleList(DoubleConv(oc, oc, normalization) for oc in out_ch)
+        self.head = nn.Conv2d(channels[0], num_classes, 1)
+
+    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+        # tokens: (B, TOKEN_DIM, grid, grid)
+        x = tokens
+        for upsample, decoder in zip(self.upsamples, self.decoders):
+            x = decoder(upsample(x))
+        return self.head(x)

@@ -45,7 +45,7 @@ def test_pair_cache_and_padded_patch_preserve_alignment(tmp_path):
     assert sample.case_id == "caseA"
     assert sample.class_counts == (0, 0, 0, 0, 19 * 23)
     assert np.load(sample.rgb_cache, mmap_mode="r").shape == (19, 23, 3)
-    image, label = PatchDataset(samples, patch_size=32, length=2, seed=1)[0]
+    image, label = PatchDataset(samples, patch_size=32, seed=1)[0]
     assert tuple(image.shape) == (3, 32, 32)
     assert tuple(label.shape) == (32, 32)
     assert int((label == 4).sum()) == 19 * 23

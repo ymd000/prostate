@@ -35,19 +35,27 @@ def scores(matrix: np.ndarray) -> dict:
     true_positive = np.diag(matrix)
     actual = matrix.sum(axis=1)
     predicted = matrix.sum(axis=0)
-    dice, iou = {}, {}
+    dice, iou, precision, recall = {}, {}, {}, {}
     for index, name in enumerate(CLASS_NAMES):
         total = int(actual[index] + predicted[index])
         union = int(total - true_positive[index])
         dice[name] = 2 * int(true_positive[index]) / total if total else None
         iou[name] = int(true_positive[index]) / union if union else None
+        precision[name] = (
+            int(true_positive[index]) / int(predicted[index]) if predicted[index] else None
+        )
+        recall[name] = int(true_positive[index]) / int(actual[index]) if actual[index] else None
     return {
         "dice": dice,
         "iou": iou,
+        "precision": precision,
+        "recall": recall,
         "foreground_macro_dice": mean_defined(dice[name] for name in CLASS_NAMES[1:]),
         "foreground_macro_iou": mean_defined(iou[name] for name in CLASS_NAMES[1:]),
         "pixel_accuracy": float(true_positive.sum() / matrix.sum()) if matrix.sum() else None,
         "target_pixels": {name: int(actual[i]) for i, name in enumerate(CLASS_NAMES)},
+        "predicted_pixels": {name: int(predicted[i]) for i, name in enumerate(CLASS_NAMES)},
+        "true_positive_pixels": {name: int(true_positive[i]) for i, name in enumerate(CLASS_NAMES)},
     }
 
 
@@ -56,21 +64,21 @@ def mean_scores(reports: list[dict]) -> dict:
         metric: {
             name: mean_defined(report[metric][name] for report in reports) for name in CLASS_NAMES
         }
-        for metric in ("dice", "iou")
+        for metric in ("dice", "iou", "precision", "recall")
     } | {
         metric: mean_defined(report[metric] for report in reports)
         for metric in ("foreground_macro_dice", "foreground_macro_iou", "pixel_accuracy")
     }
 
 
-def summarize_oof(records: list[dict], expected_ids: list[str], n_splits: int) -> dict:
+def summarize_predictions(records: list[dict], expected_ids: list[str]) -> dict:
+    """Aggregate one prediction per image, weighting cases equally in the primary report."""
     image_ids = [record["image_id"] for record in records]
     if len(image_ids) != len(set(image_ids)):
-        raise ValueError("Duplicate OOF predictions")
+        raise ValueError("Duplicate image predictions")
     if set(image_ids) - set(expected_ids):
-        raise ValueError("OOF contains unknown images")
+        raise ValueError("Predictions contain unknown images")
     cases = defaultdict(list)
-    folds = defaultdict(list)
     total = np.zeros((NUM_CLASSES, NUM_CLASSES), dtype=np.int64)
     image_reports = []
     for record in records:
@@ -82,7 +90,27 @@ def summarize_oof(records: list[dict], expected_ids: list[str], n_splits: int) -
     for (fold, case_id), matrices in sorted(cases.items()):
         report = scores(np.sum(matrices, axis=0))
         case_reports.append({"case_id": case_id, "fold": fold, **report})
-        folds[fold].append(report)
+    missing = sorted(set(expected_ids) - set(image_ids))
+    return {
+        "complete": not missing,
+        "images_evaluated": len(records),
+        "cases_evaluated": len(case_reports),
+        "missing_image_ids": missing,
+        "primary_case_mean": mean_scores(case_reports),
+        "image_mean": mean_scores(image_reports),
+        "pooled_pixels": scores(total),
+        "pooled_confusion_matrix": total.tolist(),
+        "cases": case_reports,
+        "undefined_class_policy": "Dice/IoU: null if absent in both truth and prediction; "
+        "precision: null if no predictions; recall: null if no target pixels; null excluded from mean",
+    }
+
+
+def summarize_oof(records: list[dict], expected_ids: list[str], n_splits: int) -> dict:
+    summary = summarize_predictions(records, expected_ids)
+    folds = defaultdict(list)
+    for report in summary["cases"]:
+        folds[report["fold"]].append(report)
     fold_reports = {str(fold): mean_scores(reports) for fold, reports in sorted(folds.items())}
     dispersion = {}
     for metric in ("foreground_macro_dice", "foreground_macro_iou"):
@@ -91,18 +119,8 @@ def summarize_oof(records: list[dict], expected_ids: list[str], n_splits: int) -
             "mean": float(np.mean(values)) if values else None,
             "std": float(np.std(values)) if values else None,
         }
-    missing = sorted(set(expected_ids) - set(image_ids))
-    return {
-        "complete": not missing and len(fold_reports) == n_splits,
-        "images_evaluated": len(records),
-        "cases_evaluated": len(case_reports),
-        "missing_image_ids": missing,
-        "primary_case_mean": mean_scores(case_reports),
-        "image_mean": mean_scores(image_reports),
+    return summary | {
+        "complete": summary["complete"] and len(fold_reports) == n_splits,
         "fold_case_means": fold_reports,
         "fold_mean_std": dispersion,
-        "pooled_pixels": scores(total),
-        "pooled_confusion_matrix": total.tolist(),
-        "cases": case_reports,
-        "undefined_class_policy": "null if absent in both truth and prediction; excluded from mean",
     }

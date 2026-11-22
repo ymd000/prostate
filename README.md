@@ -79,8 +79,9 @@ ln -s /path/to/Prostate/outputs outputs
 - 4段のダウンサンプリングとskip connectionを持つU-Net。初期チャネル数32、事前学習なし。
   各3×3畳み込みの後にGroupNormを入れ、batch size 1でも特徴のスケールを整える。
 - 入力はRGBを0〜1に変換。出力は5クラスのlogitsで、CrossEntropyLossで学習。
-- 症例を均等に選び、その症例の画像からランダムに256×256のパッチを抽出。90度回転と反転で拡張。
-- 既定値はbatch size 1、AdamW、学習率0.0001、20 epochs、1 epochあたり256パッチ。
+- 訓練画像を256×256の重ならないグリッドに分け、各epochで全パッチを1回ずつ処理する。
+  毎epochで順序をshuffleし、90度回転と反転で拡張。端の画像外領域はlossから除外する。
+- 既定値はbatch size 1、AdamW、学習率0.0001、20 epochs。1 epochのパッチ数はfoldごとに決まる。
 - CUDA利用時はAMPを有効化。対応GPUではBF16を優先し、それ以外ではFP16を使う。
   lossはFP32で計算し、GradScalerはFP16時のみ使う。CPUも利用可能。
 - 症例数を優先して均等化した、seed固定の5-fold。画像枚数を同数にする分割や、クラスの層化は行わない。
@@ -148,7 +149,7 @@ UV_HTTP_TIMEOUT=300 UV_CONCURRENT_DOWNLOADS=4 \
   uv sync --locked --cache-dir tmp/uv-cache
 ```
 
-`--epochs`、`--samples-per-epoch`、`--patch-size`、`--batch-size`、`--base-channels`、
+`--epochs`、`--patch-size`、`--batch-size`、`--base-channels`、
 `--halo`、`--seed` などを指定できます。`--no-amp` で混合精度を無効化します。
 `--amp-dtype auto|bfloat16|float16` でAMP精度、`--normalization group|none` で
 畳み込みブロックの正規化を指定できます。実際に使った精度は起動ログとcheckpointに記録します。
@@ -156,6 +157,103 @@ UV_HTTP_TIMEOUT=300 UV_CONCURRENT_DOWNLOADS=4 \
 分割や学習設定が既存の実験と異なる場合は、上書きせずエラーにします。
 `--resume` は完了foldのスキップです。未完了foldは最初から学習し直します。
 同じ実験へのコマンドは順に実行してください。
+
+### 凍結GigaPath-Flashと学習するdecoder
+
+`--encoder gigapath-flash` で、凍結したGigaPath-Flashの空間tokenを使う構成に切り替えます。
+256×256のRGBタイルをImageNetのmean/stdで正規化し、ViT-S/16からCLSを除いた
+16×16×384の特徴を取り出します。`TokenDecoder` はこの特徴を4段で拡大し、
+5×256×256のlogitsを出力します。encoderとのskip connectionはなく、学習するのはdecoderです。
+
+```bash
+# 初回のみ、全画像の空間tokenを抽出（学習はしない）
+uv run python -m prostate extract --encoder gigapath-flash --device cuda \
+  --extract-batch-size 1
+
+# 保存したtokenを使って各foldのdecoderを学習
+uv run python -m prostate cv --encoder gigapath-flash --device cuda \
+  --run-dir outputs/gigapath-full-grid
+```
+
+特徴は既定で `outputs/tokens/<画像ID>.h5` にfloat16で保存します。
+各ファイルにはパッチの位置・元画像サイズ・patchサイズ・encoder名も記録します。
+学習時はこの特徴を読み、OOF・単画像推論ではRGBタイルに凍結encoderを適用します。
+checkpointにはdecoderの重みを保存し、推論時にGigaPath-Flashを読み込みます。
+`predict` はcheckpointのモデル構成に応じてU-NetとGigaPath版を切り替えます。
+
+特徴抽出では既存のh5を再利用します。入力画像やpatchサイズを変える場合は、
+別の `--token-dir` を指定して再抽出し、学習時にも同じ保存先を指定してください。
+
+### 全パッチを1epochで巡回する学習
+
+U-Netと凍結GigaPath-Flashの両方で、訓練用の全グリッドパッチを各epochで1回ずつ使います。
+右端・下端も含め、RGBは反射padding、画像外の正解ラベルはIGNORE_INDEX（255）で埋めます。
+最後のbatchが小さくても捨てません。シャッフルと拡張はseedで再現できます。
+全パッチを一巡するので、大きな画像はパッチ数に応じて多く使われます。
+
+旧方式の `--samples-per-epoch` は廃止しました。`config.json` に
+`patch_sampling: "full_grid_v1"`、checkpointに `patches_per_epoch` と `batches_per_epoch`、
+`history.csv` に各epochの実際の処理パッチ数・batch数を保存します。
+旧ランダム抽出の実験とは設定が異なるため、新しい保存先で開始してください。
+
+```bash
+# 既存のtokensを使い、decoderを全パッチ巡回で学習
+uv run python -m prostate cv --encoder gigapath-flash --device cuda \
+  --run-dir outputs/gigapath-full-grid
+
+# U-Netも同じ全パッチ巡回
+uv run python -m prostate cv --device cuda --run-dir outputs/unet-full-grid
+```
+
+現在の32画像・同じfold分割・256pxグリッドでは、fold 0〜4の1epochあたりの
+訓練パッチ数は順に3,368、3,282、1,923、3,393、3,630です。
+20 epochsは全パッチ20巡となり、旧方式の5,120パッチ/foldより更新回数が増えます。
+既存のtokenキャッシュは再利用できます。サイズや位置が完全なグリッドと一致しないキャッシュは
+学習前にエラーにします。fold分割、OOF推論・評価の方法は同じです。
+
+### 訓練側のクラス別指標と履歴
+
+U-Net・GigaPath-Flashの両方で、毎epochの `history.csv` に
+`online_dice_GP5`、`online_precision_GP5`、`online_recall_GP5` など、全5クラスの
+Dice・IoU・precision・recallを保存します。`history_metrics.jsonl` には各epochの混同行列、
+正解・予測・正解一致の画素数も保存します。画像外のIGNORE_INDEXは集計から除外します。
+
+この履歴は `online_training_batches_v1` という集計方法です。学習中のforward結果を使うため、
+epochの途中で重みが更新され、回転・反転も含みます。既存のforwardから集計するので、
+毎epochの評価用forwardは追加しません。履歴の値は、そのepoch終了時の固定モデルの成績とは異なります。
+
+各foldの学習・OOF推論が終わった後には、最終checkpointの訓練画像を `eval()`・拡張なしで
+評価します。OOFと同じ256px入力・halo付きタイル結合を使い、訓練画像の全画素を評価します。
+この推論時間は追加されます。保存先は次のとおりです。
+
+- `fold_N/train_images.json`：訓練画像ごとの混同行列・クラス別指標。
+- `fold_N/train_metrics.json`：訓練側の症例平均・画像平均・全画素集計、checkpoint情報、推論条件。
+- 実験直下の `train_metrics.json`：foldごとの訓練側とOOFの指標、前景macro Diceの差。
+
+同じ画像が複数foldの訓練側に登場するため、訓練側の結果はfoldごとに表示します。
+症例平均と全画素集計は分けて記録します。precisionは予測画素が0なら `null`、recallは
+正解画素が0なら `null` で、平均から除外します（CSVでは空欄）。Dice・IoUは両方に
+そのクラスがない場合だけ `null` です。訓練画像の予測配列は1画像分ずつ一時保存し、集計後に削除します。
+
+既存モデルでも、再学習せずに最終checkpointの訓練側評価を追加できます。
+
+```bash
+# 全checkpointの訓練側を評価。旧ランダム抽出の実験でも利用可能
+uv run python -m prostate evaluate-train --run-dir outputs/gigapath --device cuda
+
+# foldを指定して確認。--fold は複数回指定可能
+uv run python -m prostate evaluate-train --run-dir outputs/gigapath --device cuda --fold 0
+
+# 評価レポートを別の場所に保存する場合
+uv run python -m prostate evaluate-train --run-dir outputs/gigapath --device cuda \
+  --output-dir outputs/gigapath/training-diagnostics
+```
+
+このコマンドは既存の重み・履歴・OOF結果を変更しません。過去のepochごとのクラス別指標は
+復元せず、最終モデルの評価を保存します。部分的な評価では `complete: false` と未評価foldを記録します。
+今後のCVでは自動実行し、`cv --resume` でも訓練側レポートが欠けている完了foldは
+既存checkpointから補完します。checkpointが変わった場合は、古い訓練側レポートを再利用しません。
+OOFをepoch選択やearly stoppingに使う処理は追加していません。
 
 ### 学習lossが非有限値になった場合
 
@@ -178,7 +276,7 @@ BF16／FP32で勾配が非有限値になった場合も、パラメータを更
 
 ### 初回OOF評価の記録
 
-`unet-stable` は32画像・ファイル名上の23症例を対象に、seed 42、各fold 20 epochs、
+旧ランダム抽出方式の `unet-stable` は32画像・ファイル名上の23症例を対象に、seed 42、各fold 20 epochs、
 1 epochあたり256パッチ、GroupNorm、学習率0.0001、BF16で実行しています。
 症例平均のforeground macro Diceは **0.1701**、IoUは **0.1180** でした。
 クラス別の症例平均Diceは、非腺領域0.8935、非がん0.4108、GP3 0.0787、GP4 0.1678、GP5 0です。
@@ -204,8 +302,12 @@ outputs/
     ├── folds.csv           # 画像ごとのfold、サイズ、クラス画素数
     ├── fold_0/ ... fold_4/
     │   ├── checkpoint.pt   # モデル重み、構造、設定、学習症例ID
-    │   ├── history.csv     # epochごとのtrain lossと秒数
+    │   ├── history.csv     # epochごとのloss、秒数、パッチ数、batch数、onlineクラス別指標
+    │   ├── history_metrics.jsonl # epochごとの混同行列・画素数・online指標
+    │   ├── train_images.json  # 最終checkpointの訓練画像別指標
+    │   ├── train_metrics.json # 最終checkpointの訓練側集計・推論条件
     │   └── evaluation.json # そのfoldのOOF画像別評価
+    ├── train_metrics.json  # foldごとの訓練側とOOFの比較
     ├── oof/<画像ID>.png    # 元サイズの予測マスク（画素値は0〜4）
     ├── oof/<画像ID>.npy    # 同じ予測のuint8配列
     ├── oof_images.json     # OOF画像別のDice・IoU・混同行列
@@ -219,7 +321,7 @@ outputs/
 ### 評価の集計
 
 主な指標は `oof_metrics.json` の `primary_case_mean` です。同じ症例の画像の
-混同行列をまとめてDice・IoUを計算し、症例を等しい重みで平均します。
+混同行列をまとめてDice・IoU・precision・recallを計算し、症例を等しい重みで平均します。
 背景（ID 0）を除いた4クラスのmacro平均と、全5クラスの個別指標を記録します。
 正解・予測の両方に存在しないクラスは `null` として平均から除きます。
 
@@ -228,11 +330,54 @@ outputs/
 一部のfoldだけが完了している場合は `complete: false` になり、全OOFの結果とは区別されます。
 OOFを見ながら設定を選んだ場合、その値は開発用CV評価として扱ってください。
 
+### OOFのサムネイル比較
+
+保存済みのOOF結果から、定性的な確認用のJPEGを生成できます。
+モデルの読み込み・学習・推論・評価指標の再計算は行わず、CPUで画像を描画します。
+U-NetとGigaPath-Flashのどちらの実験にも利用できます。
+
+```bash
+# 全画像の比較カードと一覧。既定は前景macro Diceの低い順。
+uv run python -m prostate thumbnails --run-dir outputs/gigapath-run
+
+# 最初の8画像のみ、個別カードの画像の長辺を1024pxにする
+uv run python -m prostate thumbnails --run-dir outputs/gigapath-run --limit 8 --max-side 1024
+
+# 画像を指定して確認（--image-id は複数回指定可能）
+uv run python -m prostate thumbnails --run-dir outputs/gigapath-run --image-id 14-0759_10_1
+```
+
+`--sort best|worst|id` で並び順、`--per-page` で一覧1枚あたりの画像数（既定8枚）、
+`--output-dir` で保存先を変更できます。既定の保存先は実験フォルダ内の `thumbnails/` です。
+個別カード内の各画像は長辺768px、一覧内では長辺320pxが既定です。
+`--max-side` と `--contact-side` で変更できます。保存品質は `--jpeg-quality 95`、
+色のにじみを抑えるため色差の間引きはなし（4:4:4）です。
+表示と並び替えに使うDiceは各画像単位の値で、OOF全体の症例平均とは集計単位が異なります。
+
+```text
+outputs/gigapath-run/thumbnails/
+├── sheet_001.jpg ...       # 元画像・正解・OOF予測・誤り分布の一覧
+├── images/<画像ID>.jpg     # 元画像、正解、予測、正解overlay、予測overlay、誤り分布
+└── index.json              # 今回生成した画像の一覧、fold、Dice、ページ名
+```
+
+表示色は非腺領域が薄い灰色、非がんが黒、GP3が青、GP4が緑、GP5が赤です。
+overlayでは非腺領域を透明にして元画像を表示します。正解・予測マスクは最近傍で縮小します。
+PNGは可逆圧縮なので、JPEGへの変更自体で細部は増えません。
+微細な領域の確認には `--max-side` を大きくしてください。JPEGは閲覧用であり、
+評価には保存済みのクラスID配列を使います。
+誤り分布は元解像度で正解と予測が違う画素を数え、各表示領域内の誤分類率を
+白（0%）から赤（100%）で表します。背景の誤分類も含みます。
+元の画像・マスク・OOF配列・評価JSONは変更しません。
+
 ## コードとテスト
 
 `prostate/` は `config.py`、`data.py`、`folds.py`、`model.py`、`train.py`、
 `inference.py`、`metrics.py`、`pipeline.py` とCLIの `__main__.py` に分けています。
 学習と推論のAMP精度の選択は `precision.py` にまとめています。
+凍結encoderの特徴抽出は `extractor.py`、特徴からの訓練パッチ読込は `token_data.py`、
+epochごとの指標記録は `training_history.py`、最終モデルの訓練側評価は `training_evaluation.py` です。
+OOFの比較画像は `thumbnails.py` で生成します。
 
 ```bash
 uv run ruff check .

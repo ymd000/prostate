@@ -5,9 +5,42 @@ import pytest
 import torch
 from PIL import Image
 
+from prostate.__main__ import main
 from prostate.config import Config
 from prostate.inference import predict_image
 from prostate.pipeline import evaluate_run, run_cv
+
+
+def test_cli_full_grid_config_reaches_cv_without_training(monkeypatch, capsys, tmp_path):
+    captured = []
+
+    def capture(config, folds, resume):
+        captured.append(config.to_dict())
+        return {
+            "complete": False,
+            "images_evaluated": 0,
+            "cases_evaluated": 0,
+            "primary_case_mean": {},
+        }
+
+    monkeypatch.setattr("prostate.__main__.run_cv", capture)
+    main(["cv", "--encoder", "gigapath-flash", "--run-dir", str(tmp_path)])
+    assert json.loads(capsys.readouterr().out)["complete"] is False
+    assert captured[0]["patch_sampling"] == "full_grid_v1"
+    assert "samples_per_epoch" not in captured[0]
+
+
+def test_old_random_run_cannot_be_resumed_as_full_grid(monkeypatch, tmp_path):
+    config = Config(run_dir=tmp_path, device="cpu")
+    old = config.to_dict()
+    del old["patch_sampling"]
+    old["samples_per_epoch"] = 256
+    content = json.dumps(old, indent=2) + "\n"
+    (tmp_path / "config.json").write_text(content)
+    monkeypatch.setattr("prostate.pipeline.prepare_run", lambda config: ([], {}))
+    with pytest.raises(ValueError, match="Experiment differs"):
+        run_cv(config, resume=True)
+    assert (tmp_path / "config.json").read_text() == content
 
 
 def test_five_fold_training_oof_resume_and_standalone_prediction(tmp_path):
@@ -23,7 +56,6 @@ def test_five_fold_training_oof_resume_and_standalone_prediction(tmp_path):
         cache_dir=tmp_path / "cache",
         run_dir=tmp_path / "run",
         epochs=1,
-        samples_per_epoch=1,
         patch_size=32,
         halo=4,
         base_channels=2,

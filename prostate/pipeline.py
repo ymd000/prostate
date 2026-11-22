@@ -11,12 +11,17 @@ import torch
 from tqdm import tqdm
 
 from prostate.config import Config
-from prostate.data import CLASS_NAMES, Sample, cached_arrays, prepare_dataset
+from prostate.data import CLASS_NAMES, Sample, prepare_dataset
 from prostate.folds import assign_folds
-from prostate.inference import predict_tiled, save_label_png
+from prostate.inference import load_checkpoint_model, predict_sample, save_label_png
 from prostate.metrics import confusion_matrix, scores, summarize_oof
 from prostate.precision import resolve_precision
-from prostate.train import resolve_device, train_fold
+from prostate.train import resolve_device, train_fold, train_token_fold
+from prostate.training_evaluation import (
+    collect_training_reports,
+    evaluate_training_fold,
+    training_report_current,
+)
 
 
 def write_json(path: Path, value: dict | list):
@@ -108,6 +113,14 @@ def evaluate_run(run_dir: Path) -> dict:
     return summary
 
 
+def extract_run(config: Config, batch_size: int = 8):
+    from prostate.extractor import extract_dataset
+
+    samples = prepare_dataset(config.data_dir, config.cache_dir)
+    device = resolve_device(config.device)
+    extract_dataset(samples, config.token_dir, config.patch_size, batch_size, device)
+
+
 def run_cv(config: Config, selected_folds: list[int] | None = None, resume: bool = False) -> dict:
     selected = list(range(config.n_splits)) if selected_folds is None else selected_folds
     if not selected or len(selected) != len(set(selected)):
@@ -119,38 +132,81 @@ def run_cv(config: Config, selected_folds: list[int] | None = None, resume: bool
     print(f"Device: {device}; AMP: {amp_enabled}; precision: {amp_dtype}")
     samples, assignment = prepare_run(config)
     _save_fixed(config.run_dir / "config.json", json.dumps(config.to_dict(), indent=2) + "\n")
+
+    encoder_bundle = None
+    if config.encoder == "gigapath-flash":
+        from prostate.extractor import load_gigapath_flash
+
+        missing = [
+            sample.image_id
+            for sample in samples
+            if not (config.token_dir / f"{sample.image_id}.h5").exists()
+        ]
+        if missing:
+            raise FileNotFoundError(
+                f"{len(missing)} token file(s) missing (e.g. {missing[0]}.h5). "
+                "Run 'python -m prostate extract' first."
+            )
+        encoder_bundle = load_gigapath_flash(device)
+
     for fold in selected:
-        evaluation_path = config.run_dir / f"fold_{fold}" / "evaluation.json"
-        if evaluation_path.exists():
-            if resume:
-                print(f"Fold {fold}: already complete; skipping")
-                continue
-            raise ValueError(f"Fold {fold} already exists. Use --resume or a new --run-dir.")
         training = [sample for sample in samples if assignment[sample.image_id] != fold]
         held_out = [sample for sample in samples if assignment[sample.image_id] == fold]
         train_cases = {sample.case_id for sample in training}
         if train_cases & {sample.case_id for sample in held_out}:
             raise ValueError("Training and OOF cases overlap")
-        model = train_fold(training, config, fold, device)
+        checkpoint_path = config.run_dir / f"fold_{fold}/checkpoint.pt"
+        evaluation_path = config.run_dir / f"fold_{fold}" / "evaluation.json"
+        if evaluation_path.exists():
+            if resume:
+                print(f"Fold {fold}: already complete; skipping")
+                if not training_report_current(checkpoint_path, evaluation_path.parent):
+                    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+                    if checkpoint["fold"] != fold:
+                        raise ValueError(f"Checkpoint fold mismatch: {checkpoint_path}")
+                    model = load_checkpoint_model(checkpoint, device)
+                    evaluate_training_fold(
+                        model,
+                        training,
+                        checkpoint,
+                        checkpoint_path,
+                        evaluation_path.parent,
+                        device,
+                        encoder_bundle,
+                    )
+                    del model, checkpoint
+                    gc.collect()
+                    if device.type == "cuda":
+                        torch.cuda.empty_cache()
+                continue
+            raise ValueError(f"Fold {fold} already exists. Use --resume or a new --run-dir.")
+
+        if config.encoder == "gigapath-flash":
+            model = train_token_fold(training, config, fold, device)
+        else:
+            model = train_fold(training, config, fold, device)
+
         records = []
         for sample in tqdm(held_out, desc=f"Fold {fold} OOF"):
-            rgb, _ = cached_arrays(sample.rgb_cache, sample.label_cache)
             output = config.run_dir / "oof" / f"{sample.image_id}.npy"
-            labels = predict_tiled(
-                model,
-                rgb,
-                output,
-                config.patch_size,
-                config.halo,
-                device,
-                config.amp,
-                config.amp_dtype,
-            )
+            labels = predict_sample(model, sample, output, config.to_dict(), device, encoder_bundle)
             save_label_png(labels, output.with_suffix(".png"))
             records.append(_evaluate_image(sample, output, fold))
         write_json(evaluation_path, records)
-        del model
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+        evaluate_training_fold(
+            model,
+            training,
+            checkpoint,
+            checkpoint_path,
+            evaluation_path.parent,
+            device,
+            encoder_bundle,
+        )
+        del model, checkpoint
         gc.collect()
         if device.type == "cuda":
             torch.cuda.empty_cache()
-    return evaluate_run(config.run_dir)
+    summary = evaluate_run(config.run_dir)
+    collect_training_reports(config.run_dir)
+    return summary

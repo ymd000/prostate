@@ -1,4 +1,4 @@
-"""Image pairing, legacy color labels and disk-backed random training patches."""
+"""Image pairing, legacy color labels and disk-backed grid training patches."""
 
 import hashlib
 import json
@@ -191,40 +191,50 @@ def read_tile(rgb: np.ndarray, top: int, left: int, size: int) -> np.ndarray:
     return tile
 
 
-class PatchDataset(Dataset):
-    """Sample cases uniformly, then images and positions, without loading all images."""
+def grid_positions(height: int, width: int, size: int):
+    """Cover the complete image with non-overlapping tiles, including partial edges."""
+    if min(height, width, size) < 1:
+        raise ValueError("Image dimensions and patch size must be positive")
+    for top in range(0, height, size):
+        for left in range(0, width, size):
+            yield top, left
 
-    def __init__(self, samples: list[Sample], patch_size: int, length: int, seed: int):
-        self.groups = {}
-        for sample in samples:
-            self.groups.setdefault(sample.case_id, []).append(sample)
-        self.case_ids = sorted(self.groups)
-        if not self.case_ids:
+
+def read_label_tile(labels: np.ndarray, top: int, left: int, size: int) -> np.ndarray:
+    """Pad labels outside the image with IGNORE_INDEX rather than a tissue class."""
+    target = np.asarray(labels[top : top + size, left : left + size])
+    return np.pad(
+        target,
+        ((0, size - target.shape[0]), (0, size - target.shape[1])),
+        constant_values=IGNORE_INDEX,
+    )
+
+
+class PatchDataset(Dataset):
+    """One item per grid tile; the training loader shuffles all items each epoch."""
+
+    def __init__(self, samples: list[Sample], patch_size: int, seed: int):
+        if not samples:
             raise ValueError("Training requires at least one case")
         self.patch_size = patch_size
-        self.length = length
         self.seed = seed
         self.epoch = 0
+        self.patches = [
+            (sample, top, left)
+            for sample in samples
+            for top, left in grid_positions(sample.height, sample.width, patch_size)
+        ]
 
     def __len__(self):
-        return self.length
+        return len(self.patches)
 
     def __getitem__(self, index):
         rng = np.random.default_rng(np.random.SeedSequence([self.seed, self.epoch, index]))
-        case = self.case_ids[int(rng.integers(len(self.case_ids)))]
-        samples = self.groups[case]
-        sample = samples[int(rng.integers(len(samples)))]
+        sample, top, left = self.patches[index]
         rgb, labels = cached_arrays(sample.rgb_cache, sample.label_cache)
         size = self.patch_size
-        top = int(rng.integers(max(sample.height - size, 0) + 1))
-        left = int(rng.integers(max(sample.width - size, 0) + 1))
         image = read_tile(rgb, top, left, size)
-        target = np.asarray(labels[top : top + size, left : left + size])
-        target = np.pad(
-            target,
-            ((0, size - target.shape[0]), (0, size - target.shape[1])),
-            constant_values=IGNORE_INDEX,
-        )
+        target = read_label_tile(labels, top, left, size)
         rotation = int(rng.integers(4))
         image, target = np.rot90(image, rotation), np.rot90(target, rotation)
         if rng.random() < 0.5:

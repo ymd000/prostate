@@ -36,6 +36,14 @@ def test_metrics_handle_false_positives_and_absent_classes():
     assert result["dice"]["GP4"] == 0
     assert result["dice"]["GP5"] is None
     assert result["foreground_macro_dice"] == pytest.approx(4 / 9)
+    assert result["precision"]["non_cancer"] == 1
+    assert result["recall"]["non_cancer"] == 0.5
+    assert result["precision"]["GP4"] == 0
+    assert result["recall"]["GP4"] is None
+    assert result["precision"]["GP5"] is None
+    assert result["recall"]["GP5"] is None
+    assert result["predicted_pixels"]["GP4"] == 1
+    assert result["true_positive_pixels"]["GP4"] == 0
     with pytest.raises(ValueError, match="0..4"):
         confusion_matrix(truth, np.full_like(truth, 5))
 
@@ -54,5 +62,7 @@ def test_case_mean_is_not_dominated_by_large_images_and_partial_is_explicit():
     assert summary["missing_image_ids"] == ["C_1"]
     assert summary["primary_case_mean"]["dice"]["GP3"] == 0.5
     assert summary["pooled_pixels"]["dice"]["GP3"] > 0.99
+    assert summary["primary_case_mean"]["recall"]["GP3"] == 0.5
+    assert summary["pooled_pixels"]["recall"]["GP3"] > 0.99
     with pytest.raises(ValueError, match="Duplicate"):
         summarize_oof(records + records, ["A_1", "B_1"], 2)

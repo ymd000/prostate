@@ -9,10 +9,13 @@ dependencies = [
     "numpy>=2,<3",
     "opencv-python-headless>=4.10,<5",
     "pillow>=11,<13",
+    "h5py>=3,<4",
     "scipy>=1.15,<2",
+    "timm>=1,<2",
     "torch>=2.6,<3",
     "torchvision>=0.21,<1",
     "tqdm>=4.67,<5",
+    "wsi-toolbox>=0.8.1",
 ]
 
 [dependency-groups]
