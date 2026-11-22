@@ -59,6 +59,7 @@ def test_five_fold_training_oof_resume_and_standalone_prediction(tmp_path):
         patch_size=32,
         halo=4,
         base_channels=2,
+        class_weighting="inverse-sqrt",
         device="cpu",
         cpu_threads=1,
     )
@@ -74,6 +75,11 @@ def test_five_fold_training_oof_resume_and_standalone_prediction(tmp_path):
         checkpoint_path = config.run_dir / f"fold_{record['fold']}" / "checkpoint.pt"
         checkpoint = torch.load(checkpoint_path, weights_only=True)
         assert record["case_id"] not in checkpoint["train_case_ids"]
+        loss_settings = json.loads((checkpoint_path.parent / "loss.json").read_text())
+        assert checkpoint["loss"] == loss_settings
+        assert loss_settings["class_weighting"] == "inverse-sqrt"
+        assert loss_settings["class_weights"]["GP3"] == 1
+        assert loss_settings["class_counts"]["GP3"] == len(checkpoint["train_image_ids"]) * 21 * 19
         with Image.open(config.run_dir / "oof" / f"{record['image_id']}.png") as image:
             assert image.size == (21, 19)
             assert np.asarray(image).max() < 5

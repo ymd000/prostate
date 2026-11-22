@@ -4,6 +4,14 @@
 症例単位の5-fold CVで学習し、全画像のOOF予測とDice・IoUを保存します。
 旧実装は `__archive/` に保持しています。開発ルールは [AGENTS.md](AGENTS.md) を参照してください。
 
+## 当面の目標（2026-11-22）
+
+5クラスsegmentationのIoU改善を目指し、特に背景（non_gland）以外の
+non_cancer・GP3・GP4・GP5を優先します。主指標は既存の
+`primary_case_mean.foreground_macro_iou`（背景を除く4クラスの症例平均）です。
+全5クラスの個別IoU・foldごとの成績を併記し、固定した症例単位5-foldのOOFで比較します。
+GG関連の方針は病理医のレビュー後に検討します。
+
 ## 環境
 
 - Python 3.12
@@ -211,6 +219,34 @@ uv run python -m prostate cv --device cuda --run-dir outputs/unet-full-grid
 既存のtokenキャッシュは再利用できます。サイズや位置が完全なグリッドと一致しないキャッシュは
 学習前にエラーにします。fold分割、OOF推論・評価の方法は同じです。
 
+### 重み付きCrossEntropyの比較
+
+`--class-weighting inverse-sqrt` で、各foldの訓練画像だけから求めた画素頻度に応じて
+CrossEntropyのクラス重みを付けます。既定の `none` は従来どおりの重みなしCEです。
+U-Net・GigaPath-Flashの両方に適用できます。
+
+各クラスの訓練画素数を `n_c`、訓練総画素数を `N` とすると、重みは
+`1 / sqrt(n_c / N)` に比例します。存在するクラスの重みの平均が1になるよう正規化し、
+訓練側に存在しないクラスの重みは0とします。画素数には画像外のpaddingを含めません。
+OOF側のラベル・画素数や診断CSVは重み計算に使いません。
+
+```bash
+# 既存tokenを使い、重み付きCEを同じ20 epochs・全パッチ巡回で比較
+uv run python -m prostate cv --encoder gigapath-flash --device cuda \
+  --class-weighting inverse-sqrt --run-dir outputs/gigapath-weighted-ce
+```
+
+設定の `class_weighting` は `config.json` に保存します。各foldの学習開始時に
+`fold_N/loss.json` へ訓練画像・症例ID、クラス別画素数・頻度、実際に使う重み、
+計算式、IGNORE_INDEX、FP32のloss計算条件を保存します。同じ情報はcheckpointの `loss` にも入ります。
+重み付きCEもlossはFP32で計算し、画像外のIGNORE_INDEX（255）を除外します。
+
+重みが変わると訓練lossの意味も変わるため、比較はOOFの
+`primary_case_mean.foreground_macro_iou` と各クラスのIoUを主に使います。
+評価指標の計算方法は同じで、lossのクラス重みは評価には適用しません。
+重みなし実験と重み付き実験は別の `--run-dir` に保存してください。
+重み設定の記録がない従来の実験は、重みなしの条件でのみ `--resume` できます。
+
 ### 訓練側のクラス別指標と履歴
 
 U-Net・GigaPath-Flashの両方で、毎epochの `history.csv` に
@@ -288,6 +324,27 @@ BF16／FP32で勾配が非有限値になった場合も、パラメータを更
 学習画素中のGP5の割合は0.70〜1.54%です。検証側にも全foldで全5クラスが存在します。
 GP5の成績が0なのは、fold内にそのクラスが存在しなかったためではありません。
 
+### GigaPath-Flashの重み付きCE評価（2026-11-22）
+
+`outputs/gigapath`（通常CE）と `outputs/gigapath-weighted-ce`（inverse-sqrt重み付きCE）を比較しました。
+どちらも凍結GigaPath-Flash＋TokenDecoder、32画像・23症例、seed 42の同じ症例単位5-fold、
+20 epochs・全パッチ巡回です。manifestとfold割当は一致し、lossの重み設定を変更しています。
+
+| 症例平均IoU | 通常CE | 重み付きCE |
+|---|---:|---:|
+| non_gland | 0.8839 | 0.8503 |
+| non_cancer | 0.5380 | 0.5332 |
+| GP3 | 0.3514 | 0.3682 |
+| GP4 | 0.2406 | 0.2592 |
+| GP5 | 0.0032 | 0.0467 |
+| foreground macro IoU | 0.2890 | 0.3004 |
+
+主指標の非背景macro IoUは5fold中4foldで改善しました。背景・非癌のIoUは低下しています。
+GP5は全画素集計の再現率が1.86%→32.48%、適合率が13.73%→21.33%に上がりましたが、
+誤検出は依然として多く残っています。これらは開発中のCV評価です。
+lossの計算とtensor shapeを更新した構成図は
+`outputs/tmp/architecture_gigapath_flash_weighted_ce.jpg` に保存しています（Git管理外）。
+
 ### 保存されるもの
 
 ```text
@@ -302,6 +359,7 @@ outputs/
     ├── folds.csv           # 画像ごとのfold、サイズ、クラス画素数
     ├── fold_0/ ... fold_4/
     │   ├── checkpoint.pt   # モデル重み、構造、設定、学習症例ID
+    │   ├── loss.json       # CE設定、訓練側クラス画素数・頻度・重み
     │   ├── history.csv     # epochごとのloss、秒数、パッチ数、batch数、onlineクラス別指標
     │   ├── history_metrics.jsonl # epochごとの混同行列・画素数・online指標
     │   ├── train_images.json  # 最終checkpointの訓練画像別指標
@@ -375,6 +433,7 @@ PNGは可逆圧縮なので、JPEGへの変更自体で細部は増えません�
 `prostate/` は `config.py`、`data.py`、`folds.py`、`model.py`、`train.py`、
 `inference.py`、`metrics.py`、`pipeline.py` とCLIの `__main__.py` に分けています。
 学習と推論のAMP精度の選択は `precision.py` にまとめています。
+訓練foldからのクラス重み計算とCEの設定保存は `loss.py` で行います。
 凍結encoderの特徴抽出は `extractor.py`、特徴からの訓練パッチ読込は `token_data.py`、
 epochごとの指標記録は `training_history.py`、最終モデルの訓練側評価は `training_evaluation.py` です。
 OOFの比較画像は `thumbnails.py` で生成します。

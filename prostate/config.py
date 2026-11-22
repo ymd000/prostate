@@ -22,6 +22,7 @@ class Config:
     normalization: str = "group"
     learning_rate: float = 1e-4
     weight_decay: float = 1e-4
+    class_weighting: str = "none"
     device: str = "auto"
     amp: bool = True
     amp_dtype: str = "auto"
@@ -46,6 +47,8 @@ class Config:
             raise ValueError("device must be auto, cpu or cuda")
         if self.encoder not in ("none", "gigapath-flash"):
             raise ValueError("encoder must be none or gigapath-flash")
+        if self.class_weighting not in ("none", "inverse-sqrt"):
+            raise ValueError("class_weighting must be none or inverse-sqrt")
         if self.normalization not in ("group", "none"):
             raise ValueError("normalization must be group or none")
         if self.amp_dtype not in ("auto", "bfloat16", "float16"):

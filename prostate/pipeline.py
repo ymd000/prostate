@@ -39,6 +39,19 @@ def _save_fixed(path: Path, content: str):
         temporary.replace(path)
 
 
+def _save_training_config(config: Config):
+    path = config.run_dir / "config.json"
+    if path.exists():
+        saved = json.loads(path.read_text())
+        # Runs made before class weighting used ordinary CE. Preserve their config
+        # while allowing the same unweighted objective to resume.
+        saved.setdefault("class_weighting", "none")
+        if saved != config.to_dict():
+            raise ValueError(f"Experiment differs from {path}. Use a new --run-dir.")
+    else:
+        _save_fixed(path, json.dumps(config.to_dict(), indent=2) + "\n")
+
+
 def prepare_run(config: Config) -> tuple[list[Sample], dict[str, int]]:
     samples = prepare_dataset(config.data_dir, config.cache_dir)
     assignment = assign_folds(samples, config.n_splits, config.seed)
@@ -131,7 +144,7 @@ def run_cv(config: Config, selected_folds: list[int] | None = None, resume: bool
     amp_enabled, amp_dtype = resolve_precision(device, config.amp, config.amp_dtype)
     print(f"Device: {device}; AMP: {amp_enabled}; precision: {amp_dtype}")
     samples, assignment = prepare_run(config)
-    _save_fixed(config.run_dir / "config.json", json.dumps(config.to_dict(), indent=2) + "\n")
+    _save_training_config(config)
 
     encoder_bundle = None
     if config.encoder == "gigapath-flash":

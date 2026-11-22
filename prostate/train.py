@@ -10,7 +10,8 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from prostate.config import Config
-from prostate.data import IGNORE_INDEX, NUM_CLASSES, PatchDataset, Sample
+from prostate.data import NUM_CLASSES, PatchDataset, Sample
+from prostate.loss import prepare_cross_entropy
 from prostate.model import TokenDecoder, UNet
 from prostate.precision import resolve_precision
 from prostate.token_data import TokenPatchDataset
@@ -62,7 +63,7 @@ def train_fold(samples: list[Sample], config: Config, fold: int, device: torch.d
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay
     )
-    criterion = nn.CrossEntropyLoss(ignore_index=IGNORE_INDEX)
+    criterion, loss_settings = prepare_cross_entropy(samples, config, fold, device)
     amp_enabled, amp_dtype = resolve_precision(device, config.amp, config.amp_dtype)
     scaler = torch.amp.GradScaler(device.type, enabled=amp_enabled and amp_dtype == torch.float16)
     fold_dir = config.run_dir / f"fold_{fold}"
@@ -120,6 +121,7 @@ def train_fold(samples: list[Sample], config: Config, fold: int, device: torch.d
         "patches_per_epoch": len(dataset),
         "batches_per_epoch": len(loader),
         "history_metrics_protocol": ONLINE_PROTOCOL,
+        "loss": loss_settings,
     }
     path = fold_dir / "checkpoint.pt"
     temporary = path.with_suffix(".tmp")
@@ -140,7 +142,7 @@ def train_token_fold(
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay
     )
-    criterion = nn.CrossEntropyLoss(ignore_index=IGNORE_INDEX)
+    criterion, loss_settings = prepare_cross_entropy(samples, config, fold, device)
     amp_enabled, amp_dtype = resolve_precision(device, config.amp, config.amp_dtype)
     scaler = torch.amp.GradScaler(device.type, enabled=amp_enabled and amp_dtype == torch.float16)
     fold_dir = config.run_dir / f"fold_{fold}"
@@ -196,6 +198,7 @@ def train_token_fold(
         "patches_per_epoch": len(dataset),
         "batches_per_epoch": len(loader),
         "history_metrics_protocol": ONLINE_PROTOCOL,
+        "loss": loss_settings,
     }
     path = fold_dir / "checkpoint.pt"
     temporary = path.with_suffix(".tmp")

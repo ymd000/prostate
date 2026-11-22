@@ -49,6 +49,12 @@ def _training_arguments(parser: argparse.ArgumentParser):
     )
     parser.add_argument("--token-dir", type=Path, default=defaults.token_dir)
     parser.add_argument("--encoder", choices=("none", "gigapath-flash"), default=defaults.encoder)
+    parser.add_argument(
+        "--class-weighting",
+        choices=("none", "inverse-sqrt"),
+        default=defaults.class_weighting,
+        help="Cross-entropy class weights computed from training-fold pixels only",
+    )
 
 
 def main(argv: list[str] | None = None):
