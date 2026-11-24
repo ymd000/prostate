@@ -169,7 +169,7 @@ UV_HTTP_TIMEOUT=300 UV_CONCURRENT_DOWNLOADS=4 \
 ### 凍結GigaPath-Flashと学習するdecoder
 
 `--encoder gigapath-flash` で、凍結したGigaPath-Flashの空間tokenを使う構成に切り替えます。
-256×256のRGBタイルをImageNetのmean/stdで正規化し、ViT-S/16からCLSを除いた
+既定では256×256のRGBタイルをImageNetのmean/stdで正規化し、ViT-S/16からCLSを除いた
 16×16×384の特徴を取り出します。`TokenDecoder` はこの特徴を4段で拡大し、
 5×256×256のlogitsを出力します。encoderとのskip connectionはなく、学習するのはdecoderです。
 
@@ -191,6 +191,51 @@ checkpointにはdecoderの重みを保存し、推論時にGigaPath-Flashを読�
 
 特徴抽出では既存のh5を再利用します。入力画像やpatchサイズを変える場合は、
 別の `--token-dir` を指定して再抽出し、学習時にも同じ保存先を指定してください。
+
+### 大きい入力での比較（1024px）
+
+現在利用している `wsi-toolbox` のGigaPath-Flashは `dynamic_img_size=True` です。
+`--patch-size` は元画像から切り出してencoderに渡す正方形の一辺で、
+ViT内部の `patch_size=16` は変わりません。画像を縮小せずに入力し、
+位置埋め込みだけをtokenグリッドのサイズに合わせて補間します。
+元画像の細胞の画素サイズを保ちつつ、広い範囲を一度に処理できます。
+
+| `--patch-size` | 空間tokenグリッド | 空間token数（CLS除く） |
+|---|---|---:|
+| 256 | 16×16 | 256 |
+| 512 | 32×32 | 1,024 |
+| 768 | 48×48 | 2,304 |
+| 1024 | 64×64 | 4,096 |
+
+encoderの系列にはCLSがさらに1個加わります。現在の特徴保存・読込とdecoderは
+正方形・16の倍数の入力サイズに対応します。長方形の元画像全体を一度に渡す処理はありません。
+入力を大きくするとattention部分の演算量はtoken数の二乗に応じて増え、
+decoderの学習メモリも増えます。抽出batchと学習batchはまず1で実行します。
+
+```bash
+# 1024pxグリッドの特徴を別の保存先に抽出
+uv run python -m prostate extract --encoder gigapath-flash --device cuda \
+  --patch-size 1024 --token-dir outputs/tokens-1024 --extract-batch-size 1
+
+# 同じ1024px入力で全5foldを学習・OOF評価
+uv run python -m prostate cv --encoder gigapath-flash --device cuda \
+  --patch-size 1024 --token-dir outputs/tokens-1024 \
+  --run-dir outputs/gigapath-1024-weighted-ce --class-weighting inverse-sqrt \
+  --epochs 20 --seed 42 --n-splits 5 --batch-size 1 --halo 32
+```
+
+比較対象は256px・重み付きCEの `outputs/gigapath-weighted-ce` とします。
+同じ画像・症例単位5-fold、seed 42、20 epochs、全グリッド巡回、inverse-sqrt重み付きCE、
+学習率0.0001、batch size 1、halo 32で比較します。別環境でも同じデータを配置し、
+両実験の `folds.csv` の割当が一致することを確認してください。
+パッチが大きいほど1epochのパッチ数・更新回数は減るため、各foldの
+`patches_per_epoch`・`batches_per_epoch` も併記します。
+OOFと最終checkpointの訓練側評価も、その実験の入力サイズを使います。
+主指標は症例平均foreground macro IoUとし、全5クラスのIoUとfold別成績を併記します。
+
+CPUでは、事前学習済みencoderと未学習decoderに人工入力を渡し、
+256・512・768・1024pxで同じ縦横サイズの5クラスlogitsが出て、値が有限であることを確認しました。
+この確認には学習・精度比較・GPUメモリ測定を含みません。
 
 ### 全パッチを1epochで巡回する学習
 
@@ -259,7 +304,7 @@ epochの途中で重みが更新され、回転・反転も含みます。既存
 毎epochの評価用forwardは追加しません。履歴の値は、そのepoch終了時の固定モデルの成績とは異なります。
 
 各foldの学習・OOF推論が終わった後には、最終checkpointの訓練画像を `eval()`・拡張なしで
-評価します。OOFと同じ256px入力・halo付きタイル結合を使い、訓練画像の全画素を評価します。
+評価します。OOFと同じ入力サイズ（既定256px）・halo付きタイル結合を使い、訓練画像の全画素を評価します。
 この推論時間は追加されます。保存先は次のとおりです。
 
 - `fold_N/train_images.json`：訓練画像ごとの混同行列・クラス別指標。
