@@ -237,6 +237,48 @@ CPUでは、事前学習済みencoderと未学習decoderに人工入力を渡し
 256・512・768・1024pxで同じ縦横サイズの5クラスlogitsが出て、値が有限であることを確認しました。
 この確認には学習・精度比較・GPUメモリ測定を含みません。
 
+### 再現実験：validationの1症例をholdoutに固定
+
+`holdout` コマンドは、`completed/` にある `15-1428_5_2_validation` の症例ID
+`15-1428` を検証用に固定し、残りの症例でモデルを1つ学習します。
+現在の32画像・23症例では、訓練31画像・22症例、holdout 1画像・1症例になります。
+対象は `completed/` のJPEG・PNGペアで、外付けドライブの旧 `train/` は使いません。
+同じ症例IDの別画像が追加された場合も、その症例の全画像をholdoutに割り当てます。
+`--holdout-case-id` の既定値は `15-1428` で、別の症例IDも指定できます。
+
+これは旧実装を参考にした分割条件の再現です。学習は現行の全グリッド巡回・固定epochを使い、
+holdoutをcheckpointやepoch数の選択に使いません。lossの重みは訓練31画像だけから計算します。
+入力サイズなどの既定値はCVと共通で、U-Net・GigaPath-Flashの両方を利用できます。
+
+```bash
+# U-Netの256px入力でholdout実験
+uv run python -m prostate holdout --device cuda \
+  --run-dir outputs/unet-holdout-15-1428
+
+# GigaPath-Flashの1024px特徴を抽出（抽出済みなら再利用）
+uv run python -m prostate extract --encoder gigapath-flash --device cuda \
+  --patch-size 1024 --token-dir outputs/tokens-1024 --extract-batch-size 1
+
+# GigaPath-Flashの1024px入力・重み付きCEでholdout実験
+uv run python -m prostate holdout --encoder gigapath-flash --device cuda \
+  --holdout-case-id 15-1428 --patch-size 1024 --token-dir outputs/tokens-1024 \
+  --run-dir outputs/gigapath-1024-holdout-15-1428 --class-weighting inverse-sqrt \
+  --epochs 20 --seed 42 --batch-size 1 --halo 32
+```
+
+分割と設定だけを保存する場合は、実行予定の `holdout` コマンドに `--prepare-only` を加えます。
+画像・ラベルのキャッシュを準備し、encoderの読込・特徴抽出・学習は実行しません。
+同じ設定のコマンドから `--prepare-only` を外せば学習を開始できます。
+完了した実験の再利用には `--resume` を加えます。未完了の学習は最初から実行し直します。
+入力サイズやlossなどを変える場合は、新しい `--run-dir` を指定します。
+
+保存先には `config.json`、`manifest.json`、画像ごとのtrain/holdout割当を記した `split.csv`、
+`holdout/<画像ID>.npy`・`.png`、`holdout_images.json`、`holdout_metrics.json` を作成します。
+モデル・loss設定・訓練履歴・訓練側評価は `fold_0/` に保存します。この実験で学習するモデルは1つです。
+訓練側との比較は `train_metrics.json` の `holdout_primary_case_mean` などに保存します。
+`evaluate --run-dir ...` と `evaluate-train --run-dir ...` で再集計・訓練側の再評価もできます。
+holdoutの指標はこの1症例の結果として扱い、5-fold OOFの結果と分けて記録します。
+
 ### 全パッチを1epochで巡回する学習
 
 U-Netと凍結GigaPath-Flashの両方で、訓練用の全グリッドパッチを各epochで1回ずつ使います。

@@ -3,6 +3,9 @@
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+DEFAULT_HOLDOUT_CASE_ID = "15-1428"
+DEFAULT_HOLDOUT_RUN_DIR = Path("outputs/holdout-15-1428")
+
 
 @dataclass(frozen=True)
 class Config:
@@ -12,6 +15,7 @@ class Config:
     token_dir: Path = Path("outputs/tokens")
     encoder: str = "none"
     n_splits: int = 5
+    holdout_case_id: str | None = None
     seed: int = 42
     epochs: int = 20
     patch_sampling: str = field(default="full_grid_v1", init=False)
@@ -35,6 +39,12 @@ class Config:
                 raise ValueError(f"{name} must be positive")
         if self.n_splits < 2:
             raise ValueError("n_splits must be at least 2")
+        if self.holdout_case_id is not None and (
+            not self.holdout_case_id.strip() or "_" in self.holdout_case_id
+        ):
+            raise ValueError(
+                "holdout_case_id must be a nonempty case ID before the first underscore"
+            )
         if self.patch_size < 16 or self.patch_size % 16:
             raise ValueError("patch_size must be a positive multiple of 16")
         if not 0 <= self.halo < self.patch_size / 2:
@@ -56,6 +66,11 @@ class Config:
 
     def to_dict(self) -> dict:
         result = asdict(self)
+        # Keep existing CV configurations compatible with saved experiments.
+        if self.holdout_case_id is None:
+            del result["holdout_case_id"]
+        else:
+            del result["n_splits"]
         for key in ("data_dir", "cache_dir", "run_dir", "token_dir"):
             result[key] = str(Path(result[key]).resolve())
         return result

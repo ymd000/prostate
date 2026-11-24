@@ -1,6 +1,5 @@
-"""Final-checkpoint training diagnostics using the same inference protocol as OOF."""
+"""Final-checkpoint training diagnostics with the same inference as CV or holdout."""
 
-import csv
 import gc
 import json
 from pathlib import Path
@@ -11,6 +10,12 @@ import torch
 from tqdm import tqdm
 
 from prostate.data import CLASS_NAMES, Sample
+from prostate.folds import (
+    evaluation_folds,
+    prediction_split,
+    read_assignments,
+    validate_checkpoint_split,
+)
 from prostate.inference import load_checkpoint_model, predict_sample
 from prostate.metrics import confusion_matrix, scores, summarize_predictions
 from prostate.train import resolve_device
@@ -39,33 +44,8 @@ def _read_run(run_dir: Path):
     if tuple(manifest["classes"]) != CLASS_NAMES:
         raise ValueError("Manifest class order does not match training diagnostics")
     samples = [Sample(**record) for record in manifest["samples"]]
-    with (run_dir / "folds.csv").open(newline="") as stream:
-        rows = list(csv.DictReader(stream))
-    assignments = {row["image_id"]: int(row["fold"]) for row in rows}
-    ids = {sample.image_id for sample in samples}
-    if len(ids) != len(samples) or len(rows) != len(ids) or set(assignments) != ids:
-        raise ValueError("Saved fold assignments do not match the manifest")
-    case_folds = {}
-    for sample in samples:
-        fold = assignments[sample.image_id]
-        if not 0 <= fold < settings["n_splits"]:
-            raise ValueError(f"Invalid saved fold: {fold}")
-        if case_folds.setdefault(sample.case_id, fold) != fold:
-            raise ValueError(f"Case is split across folds: {sample.case_id}")
+    assignments = read_assignments(run_dir, settings, samples)
     return settings, samples, assignments
-
-
-def _validate_checkpoint(checkpoint: dict, samples: list[Sample], fold: int):
-    expected_ids = {sample.image_id for sample in samples}
-    expected_cases = {sample.case_id for sample in samples}
-    if checkpoint["fold"] != fold:
-        raise ValueError("Checkpoint fold mismatch in training diagnostics")
-    if (
-        set(checkpoint["train_image_ids"]) != expected_ids
-        or len(checkpoint["train_image_ids"]) != len(samples)
-        or set(checkpoint["train_case_ids"]) != expected_cases
-    ):
-        raise ValueError("Checkpoint training split does not match the saved fold assignments")
 
 
 def training_report_current(checkpoint_path: Path, output_dir: Path) -> bool:
@@ -94,7 +74,7 @@ def evaluate_training_fold(
 ) -> dict:
     """Evaluate all original training pixels; keep only one temporary prediction on disk."""
     fold = checkpoint["fold"]
-    _validate_checkpoint(checkpoint, samples, fold)
+    validate_checkpoint_split(checkpoint, samples, fold)
     if not samples:
         raise ValueError("Training diagnostics require at least one training image")
     if checkpoint["architecture"] == "token_decoder_v1" and encoder_bundle is None:
@@ -145,7 +125,8 @@ def collect_training_reports(run_dir: Path, output_dir: Path | None = None) -> d
     destination.mkdir(parents=True, exist_ok=True)
     folds = {}
     by_id = {sample.image_id: sample for sample in samples}
-    for fold in range(settings["n_splits"]):
+    split = prediction_split(settings)
+    for fold in evaluation_folds(settings):
         folder = destination / f"fold_{fold}"
         if not training_report_current(run_dir / f"fold_{fold}/checkpoint.pt", folder):
             continue
@@ -161,30 +142,31 @@ def collect_training_reports(run_dir: Path, output_dir: Path | None = None) -> d
                 or record["case_id"] != by_id[record["image_id"]].case_id
                 for record in records
             ):
-                raise ValueError("Saved OOF evaluation does not match the manifest")
+                raise ValueError(f"Saved {split} evaluation does not match the manifest")
             held_out = summarize_predictions(records, expected)
             if not held_out["complete"]:
-                raise ValueError(f"Incomplete saved OOF evaluation in fold {fold}")
+                raise ValueError(f"Incomplete saved {split} evaluation in fold {fold}")
         train_mean = training["primary_case_mean"]
-        oof_mean = held_out["primary_case_mean"] if held_out else None
+        held_out_mean = held_out["primary_case_mean"] if held_out else None
         folds[str(fold)] = {
             "train_images_evaluated": training["images_evaluated"],
             "train_cases_evaluated": training["cases_evaluated"],
             "train_primary_case_mean": train_mean,
             "train_pooled_pixels": training["pooled_pixels"],
-            "oof_primary_case_mean": oof_mean,
-            "oof_pooled_pixels": held_out["pooled_pixels"] if held_out else None,
+            f"{split}_primary_case_mean": held_out_mean,
+            f"{split}_pooled_pixels": held_out["pooled_pixels"] if held_out else None,
             "foreground_macro_dice_gap": train_mean["foreground_macro_dice"]
-            - oof_mean["foreground_macro_dice"]
-            if oof_mean
+            - held_out_mean["foreground_macro_dice"]
+            if held_out_mean
             and train_mean["foreground_macro_dice"] is not None
-            and oof_mean["foreground_macro_dice"] is not None
+            and held_out_mean["foreground_macro_dice"] is not None
             else None,
         }
-    missing = [fold for fold in range(settings["n_splits"]) if str(fold) not in folds]
+    missing = [fold for fold in evaluation_folds(settings) if str(fold) not in folds]
     summary = {
         "complete": not missing,
         "split": "train",
+        "evaluation_split": split,
         "evaluation_protocol": EVALUATION_PROTOCOL,
         "run_dir": str(run_dir.resolve()),
         "output_dir": str(destination.resolve()),
@@ -204,11 +186,12 @@ def evaluate_training_run(
 ) -> dict:
     """Backfill final training metrics from checkpoints, including older sampling schemes."""
     settings, samples, assignments = _read_run(run_dir)
-    selected = list(range(settings["n_splits"])) if selected_folds is None else selected_folds
+    available = evaluation_folds(settings)
+    selected = list(available) if selected_folds is None else selected_folds
     if (
         not selected
         or len(selected) != len(set(selected))
-        or any(not 0 <= fold < settings["n_splits"] for fold in selected)
+        or any(fold not in available for fold in selected)
     ):
         raise ValueError("Choose distinct, valid fold IDs")
     if selected_folds is None:
@@ -223,7 +206,7 @@ def evaluate_training_run(
         path = run_dir / f"fold_{fold}/checkpoint.pt"
         checkpoint = torch.load(path, map_location="cpu", weights_only=True)
         training = [sample for sample in samples if assignments[sample.image_id] != fold]
-        _validate_checkpoint(checkpoint, training, fold)
+        validate_checkpoint_split(checkpoint, training, fold)
         if checkpoint["architecture"] == "token_decoder_v1" and encoder_bundle is None:
             from prostate.extractor import load_gigapath_flash
 

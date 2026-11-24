@@ -1,4 +1,4 @@
-"""Command-line entry points for CV, frozen features and OOF inspection."""
+"""Command-line entry points for CV, fixed holdout and frozen feature extraction."""
 
 import argparse
 import json
@@ -7,22 +7,24 @@ from pathlib import Path
 
 import torch
 
-from prostate.config import Config
+from prostate.config import DEFAULT_HOLDOUT_CASE_ID, DEFAULT_HOLDOUT_RUN_DIR, Config
 from prostate.inference import predict_image
-from prostate.pipeline import evaluate_run, extract_run, prepare_run, run_cv
+from prostate.pipeline import evaluate_run, extract_run, prepare_run, run_cv, run_holdout
 from prostate.thumbnails import generate_thumbnails
 from prostate.train import resolve_device
 from prostate.training_evaluation import evaluate_training_run
 
 
-def _training_arguments(parser: argparse.ArgumentParser):
+def _training_arguments(parser: argparse.ArgumentParser, include_folds: bool = True):
     defaults = Config()
+    parser.set_defaults(holdout_case_id=None, n_splits=defaults.n_splits)
+    if include_folds:
+        parser.add_argument("--n-splits", type=int, default=defaults.n_splits)
     for name in ("data_dir", "cache_dir", "run_dir"):
         parser.add_argument(
             f"--{name.replace('_', '-')}", type=Path, default=getattr(defaults, name)
         )
     for name in (
-        "n_splits",
         "seed",
         "epochs",
         "patch_size",
@@ -59,7 +61,7 @@ def _training_arguments(parser: argparse.ArgumentParser):
 
 def main(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(
-        description="Case-grouped CV, frozen encoders and OOF segmentation"
+        description="Case-grouped CV or holdout, frozen encoders and segmentation"
     )
     commands = parser.add_subparsers(dest="command", required=True)
     prepare = commands.add_parser("prepare", help="Cache RGB/labels and save case-level folds")
@@ -77,7 +79,15 @@ def main(argv: list[str] | None = None):
     cv.add_argument(
         "--resume", action="store_true", help="Skip completed folds; restart incomplete ones"
     )
-    evaluate = commands.add_parser("evaluate", help="Recompute OOF metrics from completed folds")
+    holdout = commands.add_parser("holdout", help="Train once with a fixed case held out")
+    _training_arguments(holdout, include_folds=False)
+    holdout.set_defaults(run_dir=DEFAULT_HOLDOUT_RUN_DIR)
+    holdout.add_argument("--holdout-case-id", default=DEFAULT_HOLDOUT_CASE_ID)
+    holdout.add_argument(
+        "--prepare-only", action="store_true", help="Save the split without training"
+    )
+    holdout.add_argument("--resume", action="store_true", help="Reuse a completed holdout model")
+    evaluate = commands.add_parser("evaluate", help="Recompute saved CV or holdout metrics")
     evaluate.add_argument("--run-dir", type=Path, default=Config().run_dir)
     training_evaluation = commands.add_parser(
         "evaluate-train",
@@ -135,7 +145,7 @@ def main(argv: list[str] | None = None):
             )
             print(json.dumps(result, indent=2))
             return
-        if args.command in ("prepare", "extract", "cv"):
+        if args.command in ("prepare", "extract", "cv", "holdout"):
             config = Config(
                 **{item.name: getattr(args, item.name) for item in fields(Config) if item.init}
             )
@@ -146,7 +156,27 @@ def main(argv: list[str] | None = None):
             if args.command == "extract":
                 extract_run(config, args.extract_batch_size)
                 return
-            summary = run_cv(config, args.fold, args.resume)
+            if args.command == "holdout":
+                if args.prepare_only:
+                    samples, assignment = prepare_run(config)
+                    print(
+                        json.dumps(
+                            {
+                                "holdout_case_id": config.holdout_case_id,
+                                "train_images": [
+                                    s.image_id for s in samples if assignment[s.image_id] == -1
+                                ],
+                                "holdout_images": [
+                                    s.image_id for s in samples if assignment[s.image_id] == 0
+                                ],
+                            },
+                            indent=2,
+                        )
+                    )
+                    return
+                summary = run_holdout(config, args.resume)
+            else:
+                summary = run_cv(config, args.fold, args.resume)
         elif args.command == "evaluate":
             summary = evaluate_run(args.run_dir)
         else:
