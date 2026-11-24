@@ -140,6 +140,11 @@ def predict_sample(
 ) -> np.ndarray:
     """Use the same full-image halo tiling for training diagnostics and OOF."""
     rgb, _ = cached_arrays(sample.rgb_cache, sample.label_cache)
+    if settings.get("training_recipe") == "archive_random_v1":
+        from prostate.archive_inference import predict_archive_tiled
+
+        target = np.load(sample.label_cache, mmap_mode="r")
+        return predict_archive_tiled(model, rgb, output_path, settings, device, target)
     options = {"amp": settings["amp"], "amp_dtype": settings.get("amp_dtype", "float16")}
     if encoder_bundle is None:
         return predict_tiled(
@@ -166,7 +171,11 @@ def load_checkpoint_model(checkpoint: dict, device: torch.device) -> torch.nn.Mo
     if checkpoint["model"]["num_classes"] != NUM_CLASSES:
         raise ValueError("Checkpoint class count does not match the baseline")
     model_settings = dict(checkpoint["model"])
-    if architecture in ("unet_v1", "unet_groupnorm_v2"):
+    if architecture == "archive_unet_v1":
+        from prostate.archive_model import build_archive_model
+
+        model = build_archive_model(**model_settings, pretrained=False).to(device)
+    elif architecture in ("unet_v1", "unet_groupnorm_v2"):
         model_settings.setdefault("normalization", "none" if architecture == "unet_v1" else "group")
         model = UNet(**model_settings).to(device)
     elif architecture == "token_decoder_v1":
@@ -198,7 +207,15 @@ def predict_image(
     npy_path = output_path.with_suffix(".npy")
     amp_kwargs = {"amp": settings["amp"], "amp_dtype": settings.get("amp_dtype", "float16")}
 
-    if architecture in ("unet_v1", "unet_groupnorm_v2"):
+    if architecture == "archive_unet_v1":
+        from prostate.archive_inference import predict_archive_tiled
+
+        if patch_size is not None or halo is not None:
+            raise ValueError(
+                "Archive prediction uses its saved inference_tile_size, not patch-size/halo"
+            )
+        labels = predict_archive_tiled(model, rgb, npy_path, settings, device)
+    elif architecture in ("unet_v1", "unet_groupnorm_v2"):
         labels = predict_tiled(model, rgb, npy_path, size, context, device, **amp_kwargs)
     elif architecture == "token_decoder_v1":
         from prostate.extractor import load_gigapath_flash

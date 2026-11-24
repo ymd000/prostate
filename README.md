@@ -237,7 +237,7 @@ CPUでは、事前学習済みencoderと未学習decoderに人工入力を渡し
 256・512・768・1024pxで同じ縦横サイズの5クラスlogitsが出て、値が有限であることを確認しました。
 この確認には学習・精度比較・GPUメモリ測定を含みません。
 
-### 再現実験：validationの1症例をholdoutに固定
+### 症例を固定したholdout検証（現行の学習設定）
 
 `holdout` コマンドは、`completed/` にある `15-1428_5_2_validation` の症例ID
 `15-1428` を検証用に固定し、残りの症例でモデルを1つ学習します。
@@ -246,7 +246,7 @@ CPUでは、事前学習済みencoderと未学習decoderに人工入力を渡し
 同じ症例IDの別画像が追加された場合も、その症例の全画像をholdoutに割り当てます。
 `--holdout-case-id` の既定値は `15-1428` で、別の症例IDも指定できます。
 
-これは旧実装を参考にした分割条件の再現です。学習は現行の全グリッド巡回・固定epochを使い、
+この `holdout` は現行の全グリッド巡回・固定epochを使い、
 holdoutをcheckpointやepoch数の選択に使いません。lossの重みは訓練31画像だけから計算します。
 入力サイズなどの既定値はCVと共通で、U-Net・GigaPath-Flashの両方を利用できます。
 
@@ -278,6 +278,76 @@ uv run python -m prostate holdout --encoder gigapath-flash --device cuda \
 訓練側との比較は `train_metrics.json` の `holdout_primary_case_mean` などに保存します。
 `evaluate --run-dir ...` と `evaluate-train --run-dir ...` で再集計・訓練側の再評価もできます。
 holdoutの指標はこの1症例の結果として扱い、5-fold OOFの結果と分けて記録します。
+
+### 旧U-Netの訓練条件による検証
+
+`archive-holdout` は `__archive/scripts/train_all.sh` の訓練条件を検証するコマンドです。
+旧コードは参照用のまま保持し、9種類のモデル・random crop・訓練処理を `prostate/archive_*.py` に移植しました。
+通常のCV・`holdout` は引き続き全グリッド巡回です。
+
+| 項目 | `archive-holdout` の設定 |
+|---|---|
+| モデル | `unet11`（既定）、`unet11b/n`、`unet16`・`unet16b/n`、`albunet`・`albunet_b/n` |
+| encoder | ImageNet事前学習済みVGG11/16-BNまたはResNet34。encoderを含め全体を更新 |
+| 入力・batch | 768px・4（既定）。256pxなら32、512pxなら8を自動設定 |
+| epochs | 30、最終checkpointを使用 |
+| optimizer | SGD、learning rate 0.01、momentum 0.9、weight decay 0 |
+| scheduler | 毎epoch、learning rateを0.95倍 |
+| sampling | 毎回random crop。画像の選択確率は `sqrt((H-S)*(W-S))` に比例 |
+| 1 epoch | `8 * Σ int((H/S)*(W/S))` 回抽出。最後のbatchも保持 |
+| cropの採否 | 元PNGが全0のcropを再抽出。クラスID 0だけのcropも元PNGが非0なら使用 |
+| augmentation | RGB画像とラベルの90度回転・反転。任意角度回転は旧既定と同じく無効 |
+| 前処理 | 旧OpenCV入力に合わせてBGR順に変換し、ImageNetのmean/stdで正規化 |
+| loss・精度 | 重みなしSoftmax→log→NLL、FP32、勾配クリッピングなし、BatchNorm |
+| 推論タイル | 旧 `validate.py` と同じ最大3000pxの均等分割、中央寄せの64px倍数ゼロpadding |
+
+0.8を出したモデル・入力サイズ・指標・データ分割は未確認です。モデルの既定値は旧 `train.py` と同じ
+`unet11` としました。学習入力の既定768pxは旧検証スクリプトが参照する条件に合わせています。
+データは今回の指定どおり `completed/` を使い、`15-1428` の1症例をholdout、残り31画像・22症例を訓練にします。
+当時の訓練画像一覧を再現した分割ではありません。
+
+```bash
+# 分割・設定だけを確認。学習時も同じ設定・保存先を指定する
+uv run python -m prostate archive-holdout --model unet11 --patch-size 768 \
+  --run-dir outputs/archive-unet11-768 --prepare-only
+
+# 旧条件で学習し、holdoutと最終モデルの訓練側を評価
+uv run python -m prostate archive-holdout --model unet11 --patch-size 768 \
+  --run-dir outputs/archive-unet11-768 --device cuda
+```
+
+`--patch-size 256`・`512` に変更すると既定batchも旧スクリプトの32・8になります。
+`--batch-size` で明示的に上書きできます。各条件には別の `--run-dir` を使ってください。
+現在の訓練31画像では、1epochの抽出数・更新回数は次のとおりです。
+
+| 入力 | batch | random crop数/epoch | 更新回数/epoch |
+|---|---:|---:|---:|
+| 256px | 32 | 27,936 | 873 |
+| 512px | 8 | 6,888 | 861 |
+| 768px | 4 | 2,992 | 748 |
+
+初回はImageNetの事前学習重みを取得し、既定では `outputs/cache/pretrained/` に保存します。
+`--no-pretrained` は動作確認用で、旧事前学習条件との比較には使いません。
+
+旧検証コードでは `model.eval()` が呼ばれていませんでした。このコマンドの既定は `eval` です。
+そのBatchNorm挙動も再現する場合は、実行時に `--validation-mode archive-train` を指定します。
+検証中に変わるrunning statisticsは処理後に戻し、保存済みモデルを変更しません。
+使用したモードと推論タイルサイズを評価結果に記録します。
+
+旧 `jac` は正解クラスの確率を全画素で合算するsoft指標、`pjac` は
+`(正解画素数 + 1) / (2 * 全画素数 - 正解画素数 + 1)` です。どちらも背景を含み、
+現在のforeground macro IoUとは異なります。大画像では `pjac=0.8` は正解率約88.9%に相当します。
+旧コードと同様にタイルごとの指標を平均し、画像間も等重みで平均します。
+
+- `fold_0/archive_history.csv`・`archive_history_metrics.jsonl`：学習中の旧指標、学習率、集計方法。
+- `fold_0/history.csv`・`history_metrics.jsonl`：同じ学習forwardから求めた現在のクラス別指標。
+- `holdout_metrics.json` の `archive_metrics.image_mean`：holdoutの旧 `jac`・`pjac` など。
+- 同ファイルの `primary_case_mean`：現在のforeground macro IoU・全5クラスの指標。
+- `train_metrics.json`：最終checkpointの訓練側・holdoutそれぞれの旧指標と現在の指標。
+
+旧コードで固定されていなかった乱数seedは42で固定します。抽出不能なcrop条件ではエラーにして停止します。
+移植モデル9種類の出力と旧指標の数式は旧コードと照合しました。
+CPUの小規模学習で経路を確認しています。本データでの学習・0.8の再現確認は別環境で実施します。
 
 ### 全パッチを1epochで巡回する学習
 

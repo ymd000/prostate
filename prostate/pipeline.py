@@ -10,7 +10,8 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from prostate.config import Config
+from prostate.archive_metrics import archive_prediction_metadata, summarize_archive_metrics
+from prostate.config import ArchiveConfig, Config
 from prostate.data import CLASS_NAMES, Sample, prepare_dataset
 from prostate.folds import (
     assign_folds,
@@ -46,7 +47,7 @@ def _save_fixed(path: Path, content: str):
         temporary.replace(path)
 
 
-def _save_training_config(config: Config):
+def _save_training_config(config: Config | ArchiveConfig):
     path = config.run_dir / "config.json"
     if path.exists():
         saved = json.loads(path.read_text())
@@ -59,7 +60,7 @@ def _save_training_config(config: Config):
         _save_fixed(path, json.dumps(config.to_dict(), indent=2) + "\n")
 
 
-def prepare_run(config: Config) -> tuple[list[Sample], dict[str, int]]:
+def prepare_run(config: Config | ArchiveConfig) -> tuple[list[Sample], dict[str, int]]:
     samples = prepare_dataset(config.data_dir, config.cache_dir)
     holdout = config.holdout_case_id is not None
     assignment = (
@@ -115,6 +116,7 @@ def _evaluate_image(sample: Sample, prediction_path: Path, fold: int) -> dict:
         "prediction": str(prediction_path.resolve()),
         "confusion_matrix": matrix.tolist(),
         **scores(matrix),
+        **archive_prediction_metadata(prediction_path),
     }
 
 
@@ -152,6 +154,10 @@ def evaluate_run(run_dir: Path) -> dict:
         summary.update(split=split, holdout_case_id=config["holdout_case_id"])
     else:
         summary = summarize_oof(records, sorted(samples), config["n_splits"])
+    if config.get("training_recipe") == "archive_random_v1":
+        if any("archive_metrics" not in record for record in records):
+            raise ValueError("Missing archive metric sidecars; regenerate the predictions")
+        summary["archive_metrics"] = summarize_archive_metrics(records)
     write_json(run_dir / f"{split}_metrics.json", summary)
     write_json(run_dir / f"{split}_images.json", records)
     return summary
@@ -176,13 +182,13 @@ def run_cv(config: Config, selected_folds: list[int] | None = None, resume: bool
     return _run_splits(config, selected, resume)
 
 
-def run_holdout(config: Config, resume: bool = False) -> dict:
+def run_holdout(config: Config | ArchiveConfig, resume: bool = False) -> dict:
     if config.holdout_case_id is None:
         raise ValueError("A holdout case ID is required")
     return _run_splits(config, [0], resume)
 
 
-def _run_splits(config: Config, selected: list[int], resume: bool) -> dict:
+def _run_splits(config: Config | ArchiveConfig, selected: list[int], resume: bool) -> dict:
     device = resolve_device(config.device)
     amp_enabled, amp_dtype = resolve_precision(device, config.amp, config.amp_dtype)
     print(f"Device: {device}; AMP: {amp_enabled}; precision: {amp_dtype}")
@@ -238,7 +244,11 @@ def _run_splits(config: Config, selected: list[int], resume: bool) -> dict:
                 continue
             raise ValueError(f"Fold {fold} already exists. Use --resume or a new --run-dir.")
 
-        if config.encoder == "gigapath-flash":
+        if isinstance(config, ArchiveConfig):
+            from prostate.archive_train import train_archive_fold
+
+            model = train_archive_fold(training, config, fold, device)
+        elif config.encoder == "gigapath-flash":
             model = train_token_fold(training, config, fold, device)
         else:
             model = train_fold(training, config, fold, device)

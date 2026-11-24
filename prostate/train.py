@@ -9,7 +9,7 @@ from torch import nn
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-from prostate.config import Config
+from prostate.config import ArchiveConfig, Config
 from prostate.data import NUM_CLASSES, PatchDataset, Sample
 from prostate.loss import prepare_cross_entropy
 from prostate.model import TokenDecoder, UNet
@@ -37,7 +37,7 @@ def seed_training(seed: int):
 
 
 def training_loader(
-    dataset: Dataset, config: Config, fold: int, device: torch.device
+    dataset: Dataset, config: Config | ArchiveConfig, fold: int, device: torch.device
 ) -> DataLoader:
     """Shuffle without replacement; retain the final, possibly smaller batch."""
     loader = DataLoader(
@@ -49,7 +49,10 @@ def training_loader(
         drop_last=False,
         generator=torch.Generator().manual_seed(config.seed + fold),
     )
-    print(f"Fold {fold}: full grid, {len(dataset)} patches/epoch, {len(loader)} batches/epoch")
+    sampling = (
+        "archive random crops" if config.patch_sampling == "archive_random_v1" else "full grid"
+    )
+    print(f"Fold {fold}: {sampling}, {len(dataset)} patches/epoch, {len(loader)} batches/epoch")
     return loader
 
 

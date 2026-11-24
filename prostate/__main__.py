@@ -7,7 +7,13 @@ from pathlib import Path
 
 import torch
 
-from prostate.config import DEFAULT_HOLDOUT_CASE_ID, DEFAULT_HOLDOUT_RUN_DIR, Config
+from prostate.config import (
+    ARCHIVE_MODELS,
+    DEFAULT_HOLDOUT_CASE_ID,
+    DEFAULT_HOLDOUT_RUN_DIR,
+    ArchiveConfig,
+    Config,
+)
 from prostate.inference import predict_image
 from prostate.pipeline import evaluate_run, extract_run, prepare_run, run_cv, run_holdout
 from prostate.thumbnails import generate_thumbnails
@@ -59,6 +65,43 @@ def _training_arguments(parser: argparse.ArgumentParser, include_folds: bool = T
     )
 
 
+def _archive_arguments(parser: argparse.ArgumentParser):
+    defaults = ArchiveConfig()
+    for name in ("data_dir", "cache_dir", "run_dir"):
+        parser.add_argument(
+            f"--{name.replace('_', '-')}", type=Path, default=getattr(defaults, name)
+        )
+    for name in (
+        "patch_size",
+        "epochs",
+        "samples_multiplier",
+        "max_sampling_attempts",
+        "inference_tile_size",
+        "seed",
+        "num_workers",
+        "cpu_threads",
+    ):
+        parser.add_argument(
+            f"--{name.replace('_', '-')}", type=int, default=getattr(defaults, name)
+        )
+    parser.add_argument(
+        "--batch-size", type=int, default=None, help="Default: 256px=32, 512px=8, 768px=4"
+    )
+    for name in ("learning_rate", "momentum", "lr_decay"):
+        parser.add_argument(
+            f"--{name.replace('_', '-')}", type=float, default=getattr(defaults, name)
+        )
+    parser.add_argument(
+        "--model", dest="model_name", choices=ARCHIVE_MODELS, default=defaults.model_name
+    )
+    parser.add_argument("--no-pretrained", dest="pretrained", action="store_false", default=True)
+    parser.add_argument("--holdout-case-id", default=defaults.holdout_case_id)
+    parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default=defaults.device)
+    parser.add_argument("--validation-mode", choices=("eval", "archive-train"), default="eval")
+    parser.add_argument("--prepare-only", action="store_true")
+    parser.add_argument("--resume", action="store_true")
+
+
 def main(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(
         description="Case-grouped CV or holdout, frozen encoders and segmentation"
@@ -87,6 +130,10 @@ def main(argv: list[str] | None = None):
         "--prepare-only", action="store_true", help="Save the split without training"
     )
     holdout.add_argument("--resume", action="store_true", help="Reuse a completed holdout model")
+    archive = commands.add_parser(
+        "archive-holdout", help="Verify archived U-Net training conditions"
+    )
+    _archive_arguments(archive)
     evaluate = commands.add_parser("evaluate", help="Recompute saved CV or holdout metrics")
     evaluate.add_argument("--run-dir", type=Path, default=Config().run_dir)
     training_evaluation = commands.add_parser(
@@ -145,9 +192,10 @@ def main(argv: list[str] | None = None):
             )
             print(json.dumps(result, indent=2))
             return
-        if args.command in ("prepare", "extract", "cv", "holdout"):
-            config = Config(
-                **{item.name: getattr(args, item.name) for item in fields(Config) if item.init}
+        if args.command in ("prepare", "extract", "cv", "holdout", "archive-holdout"):
+            config_type = ArchiveConfig if args.command == "archive-holdout" else Config
+            config = config_type(
+                **{item.name: getattr(args, item.name) for item in fields(config_type) if item.init}
             )
             if args.command == "prepare":
                 samples, _ = prepare_run(config)
@@ -156,7 +204,7 @@ def main(argv: list[str] | None = None):
             if args.command == "extract":
                 extract_run(config, args.extract_batch_size)
                 return
-            if args.command == "holdout":
+            if args.command in ("holdout", "archive-holdout"):
                 if args.prepare_only:
                     samples, assignment = prepare_run(config)
                     print(
@@ -200,7 +248,12 @@ def main(argv: list[str] | None = None):
                     "images_evaluated": summary["images_evaluated"],
                     "cases_evaluated": summary["cases_evaluated"],
                     "primary_case_mean": summary["primary_case_mean"],
-                },
+                }
+                | (
+                    {"archive_metrics": summary["archive_metrics"]}
+                    if "archive_metrics" in summary
+                    else {}
+                ),
                 indent=2,
             )
         )

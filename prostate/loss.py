@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from torch import nn
 
-from prostate.config import Config
+from prostate.config import ArchiveConfig, Config
 from prostate.data import CLASS_NAMES, IGNORE_INDEX, NUM_CLASSES, Sample
 
 
@@ -32,7 +32,7 @@ def class_weights(counts: np.ndarray, mode: str) -> np.ndarray | None:
 
 
 def prepare_cross_entropy(
-    samples: list[Sample], config: Config, fold: int, device: torch.device
+    samples: list[Sample], config: Config | ArchiveConfig, fold: int, device: torch.device
 ) -> tuple[nn.CrossEntropyLoss, dict]:
     """Create FP32 CE and save the exact training-only counts and weights before training."""
     if not samples or len({sample.image_id for sample in samples}) != len(samples):

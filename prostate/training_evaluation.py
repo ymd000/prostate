@@ -9,6 +9,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
+from prostate.archive_metrics import archive_prediction_metadata, summarize_archive_metrics
 from prostate.data import CLASS_NAMES, Sample
 from prostate.folds import (
     evaluation_folds,
@@ -21,6 +22,15 @@ from prostate.metrics import confusion_matrix, scores, summarize_predictions
 from prostate.train import resolve_device
 
 EVALUATION_PROTOCOL = "eval_unaugmented_halo_v1"
+ARCHIVE_EVALUATION_PROTOCOL = "archive_balanced_tiles_v1"
+
+
+def _evaluation_protocol(settings: dict) -> str:
+    return (
+        ARCHIVE_EVALUATION_PROTOCOL
+        if settings.get("training_recipe") == "archive_random_v1"
+        else EVALUATION_PROTOCOL
+    )
 
 
 def _write_json(path: Path, content: dict | list):
@@ -56,7 +66,7 @@ def training_report_current(checkpoint_path: Path, output_dir: Path) -> bool:
         return (
             report["complete"]
             and report["split"] == "train"
-            and report["evaluation_protocol"] == EVALUATION_PROTOCOL
+            and report["evaluation_protocol"] in (EVALUATION_PROTOCOL, ARCHIVE_EVALUATION_PROTOCOL)
             and report["checkpoint_fingerprint"] == _fingerprint(checkpoint_path)
         )
     except (OSError, ValueError, KeyError):
@@ -88,6 +98,7 @@ def evaluate_training_fold(
             prediction = predict_sample(model, sample, output, settings, device, encoder_bundle)
             target = np.load(sample.label_cache, mmap_mode="r")
             matrix = confusion_matrix(target, prediction)
+            archive_metadata = archive_prediction_metadata(output)
             del target, prediction
             output.unlink()
             records.append(
@@ -97,6 +108,7 @@ def evaluate_training_fold(
                     "fold": fold,
                     "confusion_matrix": matrix.tolist(),
                     **scores(matrix),
+                    **archive_metadata,
                 }
             )
     report = summarize_predictions(records, [sample.image_id for sample in samples])
@@ -105,7 +117,7 @@ def evaluate_training_fold(
             "split": "train",
             "fold": fold,
             "epoch": settings["epochs"],
-            "evaluation_protocol": EVALUATION_PROTOCOL,
+            "evaluation_protocol": _evaluation_protocol(settings),
             "checkpoint_fingerprint": _fingerprint(checkpoint_path),
             "patch_size": settings["patch_size"],
             "halo": settings["halo"],
@@ -114,6 +126,10 @@ def evaluate_training_fold(
             "predictions_saved": False,
         }
     )
+    if settings.get("training_recipe") == "archive_random_v1":
+        report["archive_metrics"] = summarize_archive_metrics(records)
+        report["validation_mode"] = settings["validation_mode"]
+        report["inference_tile_size"] = settings["inference_tile_size"]
     _write_json(output_dir / "train_images.json", records)
     _write_json(output_dir / "train_metrics.json", report)
     return report
@@ -162,12 +178,17 @@ def collect_training_reports(run_dir: Path, output_dir: Path | None = None) -> d
             and held_out_mean["foreground_macro_dice"] is not None
             else None,
         }
+        if settings.get("training_recipe") == "archive_random_v1":
+            folds[str(fold)]["train_archive_metrics"] = training["archive_metrics"]
+            folds[str(fold)][f"{split}_archive_metrics"] = (
+                summarize_archive_metrics(records) if held_out else None
+            )
     missing = [fold for fold in evaluation_folds(settings) if str(fold) not in folds]
     summary = {
         "complete": not missing,
         "split": "train",
         "evaluation_split": split,
-        "evaluation_protocol": EVALUATION_PROTOCOL,
+        "evaluation_protocol": _evaluation_protocol(settings),
         "run_dir": str(run_dir.resolve()),
         "output_dir": str(destination.resolve()),
         "folds_evaluated": [int(fold) for fold in folds],
