@@ -6,6 +6,7 @@ from pathlib import Path
 
 import torch
 
+from prostate.archive_metrics import ARCHIVE_METRICS, ArchiveMetrics
 from prostate.data import CLASS_NAMES, IGNORE_INDEX, NUM_CLASSES
 from prostate.metrics import scores
 
@@ -16,9 +17,11 @@ METRICS = ("dice", "iou", "precision", "recall")
 class EpochMetrics:
     def __init__(self, device: torch.device):
         self.matrix = torch.zeros((NUM_CLASSES, NUM_CLASSES), dtype=torch.int64, device=device)
+        self.archive_metrics = ArchiveMetrics()
 
     @torch.no_grad()
     def update(self, logits: torch.Tensor, targets: torch.Tensor):
+        self.archive_metrics.update(logits, targets)
         predictions = logits.detach().argmax(dim=1)
         valid = targets != IGNORE_INDEX
         codes = targets[valid] * NUM_CLASSES + predictions[valid]
@@ -28,7 +31,11 @@ class EpochMetrics:
 
     def report(self) -> dict:
         matrix = self.matrix.cpu().numpy()
-        return {"confusion_matrix": matrix.tolist(), **scores(matrix)}
+        return {
+            "confusion_matrix": matrix.tolist(),
+            **scores(matrix),
+            "archive_metrics": self.archive_metrics.report("batch"),
+        }
 
 
 class TrainingHistory:
@@ -52,6 +59,10 @@ class TrainingHistory:
             "online_pixel_accuracy",
         ]
         fields += [f"online_{metric}_{name}" for metric in METRICS for name in CLASS_NAMES]
+        fields += [
+            "archive_metrics_protocol",
+            *[f"online_archive_{name}" for name in ARCHIVE_METRICS],
+        ]
         self.writer = csv.DictWriter(self.csv_stream, fieldnames=fields)
         self.writer.writeheader()
         return self
@@ -73,7 +84,14 @@ class TrainingHistory:
             "patches": patches,
             "batches": batches,
             "metrics_protocol": ONLINE_PROTOCOL,
+            "archive_metrics_protocol": report["archive_metrics"]["protocol"],
         }
+        row.update(
+            {
+                f"online_archive_{name}": value
+                for name, value in report["archive_metrics"]["mean"].items()
+            }
+        )
         row.update(
             {
                 f"online_{metric}": report[metric]

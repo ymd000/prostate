@@ -9,7 +9,7 @@ from torch.nn import functional as F
 from tqdm import tqdm
 
 from prostate.archive_data import ArchivePatchDataset
-from prostate.archive_metrics import ARCHIVE_METRICS, ArchiveMetrics
+from prostate.archive_metrics import ARCHIVE_METRICS
 from prostate.archive_model import build_archive_model
 from prostate.config import ArchiveConfig
 from prostate.data import IGNORE_INDEX, NUM_CLASSES, Sample
@@ -50,7 +50,7 @@ def train_archive_fold(
         for epoch in range(config.epochs):
             dataset.epoch = epoch
             model.train()
-            metrics, old_metrics = EpochMetrics(device), ArchiveMetrics()
+            metrics = EpochMetrics(device)
             loss_sum, count, batch_losses = 0.0, 0, []
             started = time.monotonic()
             lr = optimizer.param_groups[0]["lr"]
@@ -62,7 +62,6 @@ def train_archive_fold(
                 if not torch.isfinite(loss):
                     raise RuntimeError(f"Non-finite archive loss at epoch {epoch + 1}")
                 metrics.update(logits, targets)
-                old_metrics.update(logits, targets)
                 loss.backward()
                 optimizer.step()
                 loss_sum += loss.item() * len(images)
@@ -71,7 +70,7 @@ def train_archive_fold(
             history.log(
                 epoch + 1, loss_sum / count, time.monotonic() - started, count, len(loader), metrics
             )
-            report = old_metrics.report("batch")
+            report = metrics.archive_metrics.report("batch")
             writer.writerow({"epoch": epoch + 1, "learning_rate": lr, **report["mean"]})
             json_stream.write(
                 json.dumps(

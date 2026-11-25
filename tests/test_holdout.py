@@ -131,6 +131,8 @@ def test_holdout_training_predictions_weights_resume_and_diagnostics(
     assert result["complete"] and result["split"] == "holdout"
     assert result["images_evaluated"] == 2 and result["cases_evaluated"] == 1
     assert len(result["primary_case_mean"]["iou"]) == 5
+    assert result["archive_metrics"]["complete"]
+    assert result["archive_metrics"]["images_evaluated"] == 2
     assert "fold_case_means" not in result
     assert {p.stem for p in (config.run_dir / "holdout").glob("*.png")} == expected
     assert not (config.run_dir / "oof").exists()
@@ -151,6 +153,8 @@ def test_holdout_training_predictions_weights_resume_and_diagnostics(
     assert report["complete"] and report["folds_evaluated"] == [0]
     assert report["evaluation_split"] == "holdout"
     assert report["folds"]["0"]["train_images_evaluated"] == 3
+    assert report["folds"]["0"]["train_archive_metrics"]["complete"]
+    assert report["folds"]["0"]["holdout_archive_metrics"]["complete"]
     assert "holdout_primary_case_mean" in report["folds"]["0"]
     assert "oof_primary_case_mean" not in report["folds"]["0"]
     assert evaluate_run(config.run_dir) == result

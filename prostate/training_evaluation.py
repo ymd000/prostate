@@ -68,6 +68,10 @@ def training_report_current(checkpoint_path: Path, output_dir: Path) -> bool:
             and report["split"] == "train"
             and report["evaluation_protocol"] in (EVALUATION_PROTOCOL, ARCHIVE_EVALUATION_PROTOCOL)
             and report["checkpoint_fingerprint"] == _fingerprint(checkpoint_path)
+            and report["archive_metrics"].get(
+                "complete",
+                report["archive_metrics"]["images_evaluated"] == report["images_evaluated"],
+            )
         )
     except (OSError, ValueError, KeyError):
         return False
@@ -126,8 +130,8 @@ def evaluate_training_fold(
             "predictions_saved": False,
         }
     )
+    report["archive_metrics"] = summarize_archive_metrics(records)
     if settings.get("training_recipe") == "archive_random_v1":
-        report["archive_metrics"] = summarize_archive_metrics(records)
         report["validation_mode"] = settings["validation_mode"]
         report["inference_tile_size"] = settings["inference_tile_size"]
     _write_json(output_dir / "train_images.json", records)
@@ -182,11 +186,17 @@ def collect_training_reports(run_dir: Path, output_dir: Path | None = None) -> d
                 for record in records
             ):
                 raise ValueError(f"Saved {split} evaluation does not match the manifest")
+            records = [
+                {
+                    **record,
+                    **archive_prediction_metadata(run_dir / split / f"{record['image_id']}.npy"),
+                }
+                for record in records
+            ]
             held_out = summarize_predictions(records, expected)
             if not held_out["complete"]:
                 raise ValueError(f"Incomplete saved {split} evaluation in fold {fold}")
-            if settings.get("training_recipe") == "archive_random_v1":
-                held_out["archive_metrics"] = summarize_archive_metrics(records)
+            held_out["archive_metrics"] = summarize_archive_metrics(records, expected)
         folds[str(fold)] = compare_training_heldout(training, held_out, split)
     missing = [fold for fold in evaluation_folds(settings) if str(fold) not in folds]
     summary = {

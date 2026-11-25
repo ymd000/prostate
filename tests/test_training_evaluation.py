@@ -11,7 +11,7 @@ from prostate.config import Config
 from prostate.inference import save_label_png
 from prostate.metrics import confusion_matrix
 from prostate.model import TokenDecoder, UNet
-from prostate.pipeline import prepare_run, run_cv, write_json
+from prostate.pipeline import evaluate_run, prepare_run, run_cv, write_json
 from prostate.training_evaluation import (
     EVALUATION_PROTOCOL,
     collect_training_reports,
@@ -143,6 +143,10 @@ def test_backfill_uses_exact_training_split_and_leaves_existing_artifacts_unchan
         assert "precision" in report["primary_case_mean"]
         assert "recall" in summary["folds"][str(fold)]["oof_primary_case_mean"]
         assert training_report_current(config.run_dir / f"fold_{fold}/checkpoint.pt", folder)
+        assert report["archive_metrics"]["complete"]
+        assert report["archive_metrics"]["images_evaluated"] == len(training)
+        # Existing hard-only OOF cannot reconstruct the probabilities.
+        assert not summary["folds"][str(fold)]["oof_archive_metrics"]["complete"]
     assert len(encoder_loads) == (1 if architecture == "token_decoder_v1" else 0)
     assert not list(destination.rglob("*.npy"))
     assert not list(destination.rglob("train-eval-*"))
@@ -229,3 +233,24 @@ def test_cv_automatically_evaluates_training_split_and_resume_backfills_without_
     (config.run_dir / "fold_0/train_metrics.json").unlink()
     assert run_cv(config, resume=True) == result
     assert (config.run_dir / "fold_0/train_metrics.json").is_file()
+
+    preserved = {
+        path: path.read_bytes()
+        for pattern in ("checkpoint.pt", "history.csv", "config.json")
+        for path in config.run_dir.rglob(pattern)
+    }
+    for path in (config.run_dir / "oof").glob("*.archive_metrics.json"):
+        path.unlink()
+    incomplete = evaluate_run(config.run_dir)
+    assert incomplete["primary_case_mean"] == result["primary_case_mean"]
+    assert not incomplete["archive_metrics"]["complete"]
+    assert incomplete["archive_metrics"]["image_mean"]["jac"] is None
+    monkeypatch.setattr("prostate.pipeline.evaluate_training_fold", fail)
+    assert run_cv(config, resume=True) == result
+    comparison = json.loads((config.run_dir / "train_metrics.json").read_text())
+    assert all(fold["oof_archive_metrics"]["complete"] for fold in comparison["folds"].values())
+    for path, data in preserved.items():
+        assert path.read_bytes() == data
+    (config.run_dir / "fold_0/checkpoint.pt").unlink()
+    with pytest.raises(FileNotFoundError, match="Cannot resume completed fold"):
+        run_cv(config, resume=True)

@@ -6,6 +6,7 @@ import numpy as np
 import torch
 from PIL import Image
 
+from prostate.archive_metrics import ArchiveMetrics, save_archive_prediction_metrics
 from prostate.data import NUM_CLASSES, Sample, cached_arrays, image_tensor, open_image, read_tile
 from prostate.model import TokenDecoder, UNet
 from prostate.precision import resolve_precision
@@ -31,6 +32,7 @@ def predict_tiled(
     device: torch.device,
     amp: bool = True,
     amp_dtype: str = "auto",
+    target: np.ndarray | None = None,
 ) -> np.ndarray:
     """Predict overlapping context tiles, keeping each tile's central core exactly once."""
     height, width = rgb.shape[:2]
@@ -42,6 +44,7 @@ def predict_tiled(
     was_training = model.training
     amp_enabled, autocast_dtype = resolve_precision(device, amp, amp_dtype)
     model.eval()
+    metrics = ArchiveMetrics() if target is not None else None
     try:
         with torch.inference_mode():
             for top, left, core_height, core_width in tile_positions(
@@ -57,11 +60,24 @@ def predict_tiled(
                 predictions[top : top + core_height, left : left + core_width] = labels[
                     halo : halo + core_height, halo : halo + core_width
                 ]
+                if metrics is not None:
+                    _update_core_metrics(
+                        metrics, logits, target, top, left, core_height, core_width, halo
+                    )
         predictions.flush()
     finally:
         model.train(was_training)
         del predictions
     temporary.replace(output_path)
+    if metrics is not None:
+        save_archive_prediction_metrics(
+            output_path,
+            metrics,
+            tile_region="retained_core",
+            image_shape=[height, width],
+            patch_size=patch_size,
+            halo=halo,
+        )
     return np.load(output_path, mmap_mode="r")
 
 
@@ -77,6 +93,7 @@ def predict_tiled_with_encoder(
     device: torch.device,
     amp: bool = True,
     amp_dtype: str = "auto",
+    target: np.ndarray | None = None,
 ) -> np.ndarray:
     """Encode each tile with gigapath-flash then decode to class labels."""
     height, width = rgb.shape[:2]
@@ -91,6 +108,7 @@ def predict_tiled_with_encoder(
     was_training = decoder.training
     encoder.eval()
     decoder.eval()
+    metrics = ArchiveMetrics() if target is not None else None
     try:
         with torch.inference_mode():
             for top, left, core_height, core_width in tile_positions(
@@ -112,12 +130,33 @@ def predict_tiled_with_encoder(
                 predictions[top : top + core_height, left : left + core_width] = labels[
                     halo : halo + core_height, halo : halo + core_width
                 ]
+                if metrics is not None:
+                    _update_core_metrics(
+                        metrics, logits, target, top, left, core_height, core_width, halo
+                    )
         predictions.flush()
     finally:
         decoder.train(was_training)
         del predictions
     temporary.replace(output_path)
+    if metrics is not None:
+        save_archive_prediction_metrics(
+            output_path,
+            metrics,
+            tile_region="retained_core",
+            image_shape=[height, width],
+            patch_size=patch_size,
+            halo=halo,
+        )
     return np.load(output_path, mmap_mode="r")
+
+
+def _update_core_metrics(metrics, logits, target, top, left, height, width, halo):
+    labels = torch.from_numpy(np.array(target[top : top + height, left : left + width])).long()
+    metrics.update(
+        logits[:, :, halo : halo + height, halo : halo + width],
+        labels.unsqueeze(0).to(logits.device),
+    )
 
 
 def save_label_png(labels: np.ndarray, path: Path):
@@ -139,13 +178,16 @@ def predict_sample(
     encoder_bundle: tuple | None = None,
 ) -> np.ndarray:
     """Use the same full-image halo tiling for training diagnostics and OOF."""
-    rgb, _ = cached_arrays(sample.rgb_cache, sample.label_cache)
+    rgb, target = cached_arrays(sample.rgb_cache, sample.label_cache)
     if settings.get("training_recipe") == "archive_random_v1":
         from prostate.archive_inference import predict_archive_tiled
 
-        target = np.load(sample.label_cache, mmap_mode="r")
         return predict_archive_tiled(model, rgb, output_path, settings, device, target)
-    options = {"amp": settings["amp"], "amp_dtype": settings.get("amp_dtype", "float16")}
+    options = {
+        "amp": settings["amp"],
+        "amp_dtype": settings.get("amp_dtype", "float16"),
+        "target": target,
+    }
     if encoder_bundle is None:
         return predict_tiled(
             model, rgb, output_path, settings["patch_size"], settings["halo"], device, **options

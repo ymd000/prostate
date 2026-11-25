@@ -478,6 +478,28 @@ uv run python -m prostate evaluate-train --run-dir outputs/gigapath --device cud
 既存checkpointから補完します。checkpointが変わった場合は、古い訓練側レポートを再利用しません。
 OOFをepoch選択やearly stoppingに使う処理は追加していません。
 
+### 現行CVでの旧指標
+
+U-Net・GigaPath-Flashの現行CVでも、旧実装の `dice`・`jac`・`pdice`・`pjac` を自動で保存します。
+背景を含む5クラスを対象に、`jac` はargmax前の正解クラス確率、`pjac` はargmax後の正解画素数から
+求めます。主指標は引き続き症例平均foreground macro IoUです。
+
+- `oof_metrics.json` の `archive_metrics.image_mean`：各画像のタイル平均を、全OOF画像で等重み平均。
+- 同じ場所の `archive_metrics.fold_image_means`：foldごとの画像平均。
+- `oof_images.json`・`fold_N/evaluation.json` の `archive_metrics`：画像ごとのタイル平均、タイル数、有効画素数。
+- `fold_N/train_metrics.json` の `archive_metrics` と実験直下の `train_metrics.json`：最終checkpointの訓練側評価とOOFの比較。
+- `history.csv` の `online_archive_dice`・`online_archive_jac`・`online_archive_pdice`・`online_archive_pjac`：学習中のbatch等重み平均。詳細は `history_metrics.jsonl` の `archive_metrics`。
+
+現行CVの推論では、各タイルの中央の採用領域だけを集計し、haloの重複・画像外のpaddingを除きます。
+その領域を `tile_region: retained_core`、推論条件を `patch_size`・`halo` として画像ごとに記録します。
+旧実装と同じ式・平均方法ですが、旧実装のタイル分割とは異なるため、タイルサイズなどの条件を合わせて比較してください。
+訓練履歴は既存のforwardから集計し、評価用forwardを毎epoch追加することはありません。
+
+旧指標が未保存の既存CVは、**元と同じ訓練設定・保存先**で `cv --resume` を実行すると、
+保存済みcheckpointからOOFと訓練側を再推論して補完します。完了foldの再学習は行いません。
+過去のepoch履歴は復元しません。`evaluate` は保存済みの予測と指標だけを再集計するため、
+確率情報がない場合は `archive_metrics.complete: false` と不足画像を記録します。
+
 ### 学習lossが非有限値になった場合
 
 初期版（正規化なし・学習率0.001・FP16固定）では、実データのepoch 5で

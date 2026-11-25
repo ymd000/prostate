@@ -1,5 +1,6 @@
 import json
 
+import h5py
 import numpy as np
 import pytest
 import torch
@@ -7,8 +8,9 @@ from PIL import Image
 
 from prostate.__main__ import main
 from prostate.config import Config
+from prostate.data import grid_positions
 from prostate.inference import predict_image
-from prostate.pipeline import evaluate_run, run_cv
+from prostate.pipeline import evaluate_run, prepare_run, run_cv
 
 
 def test_cli_full_grid_config_reaches_cv_without_training(monkeypatch, capsys, tmp_path):
@@ -43,7 +45,8 @@ def test_old_random_run_cannot_be_resumed_as_full_grid(monkeypatch, tmp_path):
     assert (tmp_path / "config.json").read_text() == content
 
 
-def test_five_fold_training_oof_resume_and_standalone_prediction(tmp_path):
+@pytest.mark.parametrize("encoder", ["none", "gigapath-flash"])
+def test_five_fold_training_oof_resume_and_standalone_prediction(tmp_path, monkeypatch, encoder):
     data_dir = tmp_path / "data"
     data_dir.mkdir()
     for case in range(5):
@@ -54,6 +57,7 @@ def test_five_fold_training_oof_resume_and_standalone_prediction(tmp_path):
     config = Config(
         data_dir=data_dir,
         cache_dir=tmp_path / "cache",
+        token_dir=tmp_path / "tokens",
         run_dir=tmp_path / "run",
         epochs=1,
         patch_size=32,
@@ -62,13 +66,40 @@ def test_five_fold_training_oof_resume_and_standalone_prediction(tmp_path):
         class_weighting="inverse-sqrt",
         device="cpu",
         cpu_threads=1,
+        encoder=encoder,
     )
+    if encoder == "gigapath-flash":
+        samples, _ = prepare_run(config)
+        config.token_dir.mkdir()
+        for sample in samples:
+            positions = list(grid_positions(sample.height, sample.width, config.patch_size))
+            with h5py.File(config.token_dir / f"{sample.image_id}.h5", "w") as cache:
+                cache.attrs["patch_size"] = config.patch_size
+                cache.create_dataset("positions", data=np.array(positions, dtype=np.int32))
+                cache.create_dataset(
+                    "tokens", data=np.zeros((len(positions), 2, 2, 384), np.float16)
+                )
+
+        class FakeFrozenEncoder(torch.nn.Module):
+            def forward_features(self, inputs):
+                assert not torch.is_grad_enabled()
+                return inputs.new_zeros((len(inputs), 5, 384))
+
+        monkeypatch.setattr(
+            "prostate.extractor.load_gigapath_flash",
+            lambda device: (FakeFrozenEncoder(), [0, 0, 0], [1, 1, 1]),
+        )
     partial = run_cv(config, selected_folds=[0])
     assert not partial["complete"]
+    assert not partial["archive_metrics"]["complete"]
+    assert partial["archive_metrics"]["missing_image_ids"]
     result = run_cv(config, resume=True)
     assert result["complete"]
     assert result["images_evaluated"] == 6
     assert result["cases_evaluated"] == 5
+    assert result["archive_metrics"]["complete"]
+    assert result["archive_metrics"]["images_evaluated"] == 6
+    assert set(result["archive_metrics"]["fold_image_means"]) == {"0", "1", "2", "3", "4"}
     assert len(list((config.run_dir / "oof").glob("*.png"))) == 6
     records = json.loads((config.run_dir / "oof_images.json").read_text())
     for record in records:

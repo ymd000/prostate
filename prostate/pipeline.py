@@ -10,7 +10,11 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from prostate.archive_metrics import archive_prediction_metadata, summarize_archive_metrics
+from prostate.archive_metrics import (
+    archive_prediction_current,
+    archive_prediction_metadata,
+    summarize_archive_metrics,
+)
 from prostate.config import ArchiveConfig, ArchiveEvaluationConfig, Config
 from prostate.data import CLASS_NAMES, Sample, prepare_dataset
 from prostate.folds import (
@@ -153,11 +157,13 @@ def evaluate_run(run_dir: Path) -> dict:
         summary = summarize_predictions(records, expected)
         summary.update(split=split, holdout_case_id=config["holdout_case_id"])
     else:
+        expected = sorted(samples)
         summary = summarize_oof(records, sorted(samples), config["n_splits"])
-    if config.get("training_recipe") == "archive_random_v1":
-        if any("archive_metrics" not in record for record in records):
-            raise ValueError("Missing archive metric sidecars; regenerate the predictions")
-        summary["archive_metrics"] = summarize_archive_metrics(records)
+    if config.get("training_recipe") == "archive_random_v1" and any(
+        "archive_metrics" not in record for record in records
+    ):
+        raise ValueError("Missing archive metric sidecars; regenerate the predictions")
+    summary["archive_metrics"] = summarize_archive_metrics(records, expected)
     write_json(run_dir / f"{split}_metrics.json", summary)
     write_json(run_dir / f"{split}_images.json", records)
     return summary
@@ -228,7 +234,19 @@ def _run_splits(config: Config | ArchiveConfig, selected: list[int], resume: boo
         checkpoint_path = config.run_dir / f"fold_{fold}/checkpoint.pt"
         evaluation_path = config.run_dir / f"fold_{fold}" / "evaluation.json"
         if evaluation_path.exists():
-            if resume:
+            if not resume:
+                raise ValueError(f"Fold {fold} already exists. Use --resume or a new --run-dir.")
+            if not checkpoint_path.is_file():
+                raise FileNotFoundError(f"Cannot resume completed fold without {checkpoint_path}")
+            metrics_current = all(
+                archive_prediction_current(
+                    config.run_dir / split / f"{sample.image_id}.npy",
+                    config.to_dict(),
+                    (sample.height, sample.width),
+                )
+                for sample in held_out
+            )
+            if metrics_current:
                 print(f"Fold {fold}: already complete; skipping")
                 if not training_report_current(checkpoint_path, evaluation_path.parent):
                     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
@@ -248,7 +266,7 @@ def _run_splits(config: Config | ArchiveConfig, selected: list[int], resume: boo
                     if device.type == "cuda":
                         torch.cuda.empty_cache()
                 continue
-            raise ValueError(f"Fold {fold} already exists. Use --resume or a new --run-dir.")
+            print(f"Fold {fold}: archive metrics missing; regenerating inference from checkpoint")
 
         if checkpoint_path.exists():
             if not resume:
@@ -282,15 +300,16 @@ def _run_splits(config: Config | ArchiveConfig, selected: list[int], resume: boo
             records.append(_evaluate_image(sample, output, fold))
         write_json(evaluation_path, records)
         checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-        evaluate_training_fold(
-            model,
-            training,
-            checkpoint,
-            checkpoint_path,
-            evaluation_path.parent,
-            device,
-            encoder_bundle,
-        )
+        if not training_report_current(checkpoint_path, evaluation_path.parent):
+            evaluate_training_fold(
+                model,
+                training,
+                checkpoint,
+                checkpoint_path,
+                evaluation_path.parent,
+                device,
+                encoder_bundle,
+            )
         del model, checkpoint
         gc.collect()
         if device.type == "cuda":

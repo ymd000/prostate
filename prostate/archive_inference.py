@@ -1,13 +1,12 @@
 """Archived balanced tiles, centered zero padding and optional train-mode BatchNorm."""
 
-import json
 from pathlib import Path
 
 import numpy as np
 import torch
 
 from prostate.archive_data import archive_image_tensor
-from prostate.archive_metrics import ArchiveMetrics
+from prostate.archive_metrics import ArchiveMetrics, save_archive_prediction_metrics
 
 
 def archive_tile_positions(height: int, width: int, maximum: int):
@@ -77,11 +76,12 @@ def predict_archive_tiled(
         del predictions
     temporary.replace(output_path)
     if metrics is not None:
-        report = metrics.report("tile")
-        report["validation_mode"] = settings["validation_mode"]
-        report["inference_tile_size"] = settings["inference_tile_size"]
-        sidecar = output_path.with_suffix(".archive_metrics.json")
-        temporary_report = sidecar.with_suffix(".tmp")
-        temporary_report.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
-        temporary_report.replace(sidecar)
+        save_archive_prediction_metrics(
+            output_path,
+            metrics,
+            tile_region="unpadded_tile",
+            image_shape=[height, width],
+            validation_mode=settings["validation_mode"],
+            inference_tile_size=settings["inference_tile_size"],
+        )
     return np.load(output_path, mmap_mode="r")
