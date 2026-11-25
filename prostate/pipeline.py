@@ -70,7 +70,7 @@ def prepare_run(config: Config | ArchiveConfig) -> tuple[list[Sample], dict[str,
     incompatible = "folds.csv" if holdout else "split.csv"
     if (config.run_dir / incompatible).exists():
         raise ValueError("Experiment split differs. Use a new --run-dir.")
-    if holdout:
+    if holdout or isinstance(config, ArchiveConfig):
         _save_training_config(config)
     manifest = {"classes": CLASS_NAMES, "samples": [sample.to_dict() for sample in samples]}
     _save_fixed(config.run_dir / "manifest.json", json.dumps(manifest, indent=2) + "\n")
@@ -111,7 +111,9 @@ def extract_run(config: Config, batch_size: int = 8):
     extract_dataset(samples, config.token_dir, config.patch_size, batch_size, device)
 
 
-def run_cv(config: Config, selected_folds: list[int] | None = None, resume: bool = False) -> dict:
+def run_cv(
+    config: Config | ArchiveConfig, selected_folds: list[int] | None = None, resume: bool = False
+) -> dict:
     if config.holdout_case_id is not None:
         raise ValueError("Use run_holdout for a fixed holdout case")
     selected = list(range(config.n_splits)) if selected_folds is None else selected_folds

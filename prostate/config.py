@@ -90,12 +90,13 @@ class Config:
 
 @dataclass(frozen=True)
 class ArchiveConfig:
-    """An explicit exception to the full-grid baseline for historical verification."""
+    """Historical training conditions for case-level CV or fixed holdout verification."""
 
     data_dir: Path = Path("data/completed")
     cache_dir: Path = Path("outputs/cache")
     run_dir: Path = Path("outputs/archive-holdout-15-1428")
-    holdout_case_id: str = DEFAULT_HOLDOUT_CASE_ID
+    holdout_case_id: str | None = DEFAULT_HOLDOUT_CASE_ID
+    n_splits: int = 5
     model_name: str = "unet11"
     pretrained: bool = True
     patch_size: int = 768
@@ -143,7 +144,11 @@ class ArchiveConfig:
             raise ValueError(f"Unknown archive model: {self.model_name}")
         if self.patch_size < 64 or self.patch_size % 64:
             raise ValueError("Archive patch_size must be a positive multiple of 64")
-        if not self.holdout_case_id.strip() or "_" in self.holdout_case_id:
+        if self.n_splits < 2:
+            raise ValueError("n_splits must be at least 2")
+        if self.holdout_case_id is not None and (
+            not self.holdout_case_id.strip() or "_" in self.holdout_case_id
+        ):
             raise ValueError("holdout_case_id must be a case ID before the first underscore")
         if self.learning_rate <= 0 or not 0 <= self.momentum < 1 or not 0 < self.lr_decay <= 1:
             raise ValueError("Invalid archive optimizer settings")
@@ -156,6 +161,11 @@ class ArchiveConfig:
 
     def to_dict(self) -> dict:
         result = asdict(self)
+        if self.holdout_case_id is None:
+            del result["holdout_case_id"]
+        else:
+            # Preserve the saved configuration of existing holdout experiments.
+            del result["n_splits"]
         for key in ("data_dir", "cache_dir", "run_dir"):
             result[key] = str(Path(result[key]).resolve())
         return result

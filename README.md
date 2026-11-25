@@ -292,7 +292,8 @@ holdoutの指標はこの1症例の結果として扱い、5-fold OOFの結果�
 
 `archive-holdout` は `__archive/scripts/train_all.sh` の訓練条件を検証するコマンドです。
 旧コードは参照用のまま保持し、9種類のモデル・random crop・訓練処理を `prostate/archive_*.py` に移植しました。
-通常のCV・`holdout` は引き続き全グリッド巡回です。
+通常のCV（`--recipe full-grid`、既定）・`holdout` は全グリッド巡回です。
+`cv --recipe archive` では、同じ旧学習条件を現行の症例単位CVに適用できます。
 
 | 項目 | `archive-holdout` の設定 |
 |---|---|
@@ -357,6 +358,44 @@ uv run python -m prostate archive-holdout --model unet11 --patch-size 768 \
 旧コードで固定されていなかった乱数seedは42で固定します。抽出不能なcrop条件ではエラーにして停止します。
 移植モデル9種類の出力と旧指標の数式は旧コードと照合しました。
 CPUの小規模学習で経路を確認しています。本データでの学習・0.8の再現確認は別環境で実施します。
+
+### 現行CVで旧条件を比較する
+
+`cv --recipe archive` は、上表のモデル・訓練・推論条件を使い、現行CVと同じ症例単位5-foldで評価します。
+今回のholdout再実験（UNet11・768px・batch 8）に合わせる場合は次のコマンドです。
+
+```bash
+uv run python -m prostate cv --recipe archive \
+  --model unet11 --patch-size 768 --batch-size 8 \
+  --epochs 30 --learning-rate 0.01 --momentum 0.9 --lr-decay 0.95 \
+  --n-splits 5 --seed 42 --device cuda \
+  --run-dir outputs/unet11-768-cv
+```
+
+ImageNet事前学習、encoderを含む全体の更新、BGR＋ImageNet正規化、BatchNorm、
+重みなしloss、FP32、random cropの抽出方法・8倍の抽出係数、回転・反転もholdout実験と共通です。
+batchは明示しないと旧スクリプトの既定値（768pxでは4）になります。
+入力画像はリサイズせず、指定したサイズで切り出します。
+
+データ・seed・fold数が同じなら、通常のU-NetやGigaPath-FlashのCVと `folds.csv` が一致します。
+`validation` という名前の画像も通常の症例割当に含めます。各foldでモデルを初期化し、
+固定30 epochsの最終checkpointから、そのfoldの未学習症例だけをOOF予測します。
+OOFをcheckpointの選択には使いません。
+
+holdoutとは訓練症例数が異なるため、同じ抽出係数・epoch数でも各foldのcrop数と更新回数は変わります。
+実際のパッチ数・batch数はcheckpointと `history.csv` に保存します。
+通常のCV既定条件との比較では、モデル構造・事前学習・optimizer・samplingなども異なります。
+
+推論はholdout実験と同じ `eval`・最大3000pxの均等分割が既定です。
+768pxタイルで評価したholdout実験に合わせる場合は、最初から `--inference-tile-size 768` を指定します。
+訓練側の最終モデル評価にも同じタイルサイズを使います。
+
+`oof_metrics.json` に主指標の症例平均foreground macro IoU、全5クラスの指標、fold別成績、
+旧 `jac`・`pjac` などを保存します。各foldの訓練履歴・訓練側評価の保存先は通常のCVと同じです。
+`--fold 0` などでfoldを限定でき、`--resume` で完了foldを再利用できます。
+`--prepare-only` は分割・設定の保存だけを行い、事前学習重みやGPUを読み込みません。
+旧指標の再取得には `evaluate`、訓練側の再評価には `evaluate-train` を使えます。
+詳細な引数は `uv run python -m prostate cv --recipe archive --help` で確認できます。
 
 ### 学習完了後に推論がOOMになった場合
 

@@ -73,7 +73,7 @@ def _training_arguments(parser: argparse.ArgumentParser, include_folds: bool = T
     )
 
 
-def _archive_arguments(parser: argparse.ArgumentParser):
+def _archive_arguments(parser: argparse.ArgumentParser, include_holdout: bool = True):
     defaults = ArchiveConfig()
     for name in ("data_dir", "cache_dir", "run_dir"):
         parser.add_argument(
@@ -103,7 +103,12 @@ def _archive_arguments(parser: argparse.ArgumentParser):
         "--model", dest="model_name", choices=ARCHIVE_MODELS, default=defaults.model_name
     )
     parser.add_argument("--no-pretrained", dest="pretrained", action="store_false", default=True)
-    parser.add_argument("--holdout-case-id", default=defaults.holdout_case_id)
+    if include_holdout:
+        parser.set_defaults(n_splits=defaults.n_splits)
+        parser.add_argument("--holdout-case-id", default=defaults.holdout_case_id)
+    else:
+        parser.set_defaults(holdout_case_id=None, run_dir=Path("outputs/unet11-archive-cv"))
+        parser.add_argument("--n-splits", type=int, default=defaults.n_splits)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default=defaults.device)
     parser.add_argument("--validation-mode", choices=("eval", "archive-train"), default="eval")
     parser.add_argument("--prepare-only", action="store_true")
@@ -111,6 +116,11 @@ def _archive_arguments(parser: argparse.ArgumentParser):
 
 
 def main(argv: list[str] | None = None):
+    # Select the CV argument set first so recipe defaults are applied before explicit
+    # overrides, and options belonging to the other recipe are rejected by argparse.
+    selector = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    selector.add_argument("--recipe", default="full-grid")
+    recipe = selector.parse_known_args(argv)[0].recipe
     parser = argparse.ArgumentParser(
         description="Case-grouped CV or holdout, frozen encoders and segmentation"
     )
@@ -124,12 +134,23 @@ def main(argv: list[str] | None = None):
     extract.add_argument(
         "--extract-batch-size", type=int, default=8, help="Encoder forward-pass batch size"
     )
-    cv = commands.add_parser("cv", help="Train fixed-epoch folds and save held-out predictions")
-    _training_arguments(cv)
-    cv.add_argument("--fold", type=int, action="append", help="Only run this fold (repeatable)")
-    cv.add_argument(
-        "--resume", action="store_true", help="Skip completed folds; restart incomplete ones"
+    cv = commands.add_parser(
+        "cv", help="Train fixed-epoch folds and save held-out predictions", allow_abbrev=False
     )
+    cv.add_argument(
+        "--recipe",
+        choices=("full-grid", "archive"),
+        default="full-grid",
+        help="Training conditions; use cv --recipe archive --help for historical options",
+    )
+    if recipe == "archive":
+        _archive_arguments(cv, include_holdout=False)
+    else:
+        _training_arguments(cv)
+        cv.add_argument(
+            "--resume", action="store_true", help="Skip completed folds; restart incomplete ones"
+        )
+    cv.add_argument("--fold", type=int, action="append", help="Only run this fold (repeatable)")
     holdout = commands.add_parser("holdout", help="Train once with a fixed case held out")
     _training_arguments(holdout, include_folds=False)
     holdout.set_defaults(run_dir=DEFAULT_HOLDOUT_RUN_DIR)
@@ -239,11 +260,16 @@ def main(argv: list[str] | None = None):
             print(json.dumps(result, indent=2))
             return
         if args.command in ("prepare", "extract", "cv", "holdout", "archive-holdout"):
-            config_type = ArchiveConfig if args.command == "archive-holdout" else Config
+            archive_recipe = args.command == "archive-holdout" or (
+                args.command == "cv" and args.recipe == "archive"
+            )
+            config_type = ArchiveConfig if archive_recipe else Config
             config = config_type(
                 **{item.name: getattr(args, item.name) for item in fields(config_type) if item.init}
             )
-            if args.command == "prepare":
+            if args.command == "prepare" or (
+                args.command == "cv" and archive_recipe and args.prepare_only
+            ):
                 samples, _ = prepare_run(config)
                 print(f"Prepared {len(samples)} images / {len({s.case_id for s in samples})} cases")
                 return
