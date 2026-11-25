@@ -159,3 +159,22 @@ class ArchiveConfig:
         for key in ("data_dir", "cache_dir", "run_dir"):
             result[key] = str(Path(result[key]).resolve())
         return result
+
+
+@dataclass(frozen=True)
+class ArchiveEvaluationConfig:
+    """Inference overrides for a saved archive checkpoint; never training settings."""
+
+    run_dir: Path
+    device: str = "auto"
+    inference_tile_size: int | None = None
+    validation_mode: str | None = None
+    output_dir: Path | None = None
+
+    def __post_init__(self):
+        if self.device not in ("auto", "cpu", "cuda"):
+            raise ValueError("device must be auto, cpu or cuda")
+        if self.inference_tile_size is not None and self.inference_tile_size < 1:
+            raise ValueError("inference_tile_size must be positive")
+        if self.validation_mode not in (None, "eval", "archive-train"):
+            raise ValueError("validation_mode must be eval or archive-train")

@@ -12,10 +12,18 @@ from prostate.config import (
     DEFAULT_HOLDOUT_CASE_ID,
     DEFAULT_HOLDOUT_RUN_DIR,
     ArchiveConfig,
+    ArchiveEvaluationConfig,
     Config,
 )
 from prostate.inference import predict_image
-from prostate.pipeline import evaluate_run, extract_run, prepare_run, run_cv, run_holdout
+from prostate.pipeline import (
+    evaluate_archive_checkpoint,
+    evaluate_run,
+    extract_run,
+    prepare_run,
+    run_cv,
+    run_holdout,
+)
 from prostate.thumbnails import generate_thumbnails
 from prostate.train import resolve_device
 from prostate.training_evaluation import evaluate_training_run
@@ -134,6 +142,14 @@ def main(argv: list[str] | None = None):
         "archive-holdout", help="Verify archived U-Net training conditions"
     )
     _archive_arguments(archive)
+    archive_evaluation = commands.add_parser(
+        "archive-evaluate", help="Evaluate a final archive checkpoint without training"
+    )
+    archive_evaluation.add_argument("--run-dir", type=Path, required=True)
+    archive_evaluation.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
+    archive_evaluation.add_argument("--inference-tile-size", type=int)
+    archive_evaluation.add_argument("--validation-mode", choices=("eval", "archive-train"))
+    archive_evaluation.add_argument("--output-dir", type=Path)
     evaluate = commands.add_parser("evaluate", help="Recompute saved CV or holdout metrics")
     evaluate.add_argument("--run-dir", type=Path, default=Config().run_dir)
     training_evaluation = commands.add_parser(
@@ -166,6 +182,28 @@ def main(argv: list[str] | None = None):
     predict.add_argument("--cpu-threads", type=int, default=4)
     args = parser.parse_args(argv)
     try:
+        if args.command == "archive-evaluate":
+            config = ArchiveEvaluationConfig(
+                **{item.name: getattr(args, item.name) for item in fields(ArchiveEvaluationConfig)}
+            )
+            result = evaluate_archive_checkpoint(config)
+            print(
+                json.dumps(
+                    {
+                        key: result[key]
+                        for key in (
+                            "complete",
+                            "output_dir",
+                            "images_evaluated",
+                            "cases_evaluated",
+                            "primary_case_mean",
+                            "archive_metrics",
+                        )
+                    },
+                    indent=2,
+                )
+            )
+            return
         if args.command == "evaluate-train":
             summary = evaluate_training_run(args.run_dir, args.device, args.fold, args.output_dir)
             print(

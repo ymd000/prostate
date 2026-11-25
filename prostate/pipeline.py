@@ -11,7 +11,7 @@ import torch
 from tqdm import tqdm
 
 from prostate.archive_metrics import archive_prediction_metadata, summarize_archive_metrics
-from prostate.config import ArchiveConfig, Config
+from prostate.config import ArchiveConfig, ArchiveEvaluationConfig, Config
 from prostate.data import CLASS_NAMES, Sample, prepare_dataset
 from prostate.folds import (
     assign_folds,
@@ -188,6 +188,12 @@ def run_holdout(config: Config | ArchiveConfig, resume: bool = False) -> dict:
     return _run_splits(config, [0], resume)
 
 
+def evaluate_archive_checkpoint(config: ArchiveEvaluationConfig) -> dict:
+    from prostate.archive_evaluation import evaluate_archive_checkpoint as evaluate
+
+    return evaluate(config)
+
+
 def _run_splits(config: Config | ArchiveConfig, selected: list[int], resume: bool) -> dict:
     device = resolve_device(config.device)
     amp_enabled, amp_dtype = resolve_precision(device, config.amp, config.amp_dtype)
@@ -244,7 +250,19 @@ def _run_splits(config: Config | ArchiveConfig, selected: list[int], resume: boo
                 continue
             raise ValueError(f"Fold {fold} already exists. Use --resume or a new --run-dir.")
 
-        if isinstance(config, ArchiveConfig):
+        if checkpoint_path.exists():
+            if not resume:
+                raise ValueError(
+                    f"Final checkpoint already exists in fold {fold}. "
+                    "Use --resume to finish inference without retraining, "
+                    "or archive-evaluate to change archive inference settings."
+                )
+            checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+            validate_checkpoint_split(checkpoint, training, fold)
+            print(f"Fold {fold}: final checkpoint found; resuming inference without training")
+            model = load_checkpoint_model(checkpoint, device)
+            del checkpoint
+        elif isinstance(config, ArchiveConfig):
             from prostate.archive_train import train_archive_fold
 
             model = train_archive_fold(training, config, fold, device)
@@ -253,6 +271,9 @@ def _run_splits(config: Config | ArchiveConfig, selected: list[int], resume: boo
         else:
             model = train_fold(training, config, fold, device)
 
+        model.zero_grad(set_to_none=True)
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
         records = []
         for sample in tqdm(held_out, desc=f"Fold {fold} {split}"):
             output = config.run_dir / split / f"{sample.image_id}.npy"

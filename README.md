@@ -163,7 +163,9 @@ UV_HTTP_TIMEOUT=300 UV_CONCURRENT_DOWNLOADS=4 \
 畳み込みブロックの正規化を指定できます。実際に使った精度は起動ログとcheckpointに記録します。
 別の設定を試す場合は、新しい `--run-dir outputs/実験名` を指定してください。
 分割や学習設定が既存の実験と異なる場合は、上書きせずエラーにします。
-`--resume` は完了foldのスキップです。未完了foldは最初から学習し直します。
+`--resume` は完了foldをスキップします。最終 `checkpoint.pt` が保存済みで推論だけ未完了なら、
+その重みを読み込んで推論・評価から再開します。最終checkpointがない未完了foldは最初から学習し直します。
+最終checkpointがある保存先へ `--resume` なしで実行すると、再学習せずエラーで終了します。
 同じ実験へのコマンドは順に実行してください。
 
 ### 凍結GigaPath-Flashと学習するdecoder
@@ -269,7 +271,8 @@ uv run python -m prostate holdout --encoder gigapath-flash --device cuda \
 分割と設定だけを保存する場合は、実行予定の `holdout` コマンドに `--prepare-only` を加えます。
 画像・ラベルのキャッシュを準備し、encoderの読込・特徴抽出・学習は実行しません。
 同じ設定のコマンドから `--prepare-only` を外せば学習を開始できます。
-完了した実験の再利用には `--resume` を加えます。未完了の学習は最初から実行し直します。
+完了した実験の再利用には `--resume` を加えます。学習済みの最終checkpointがあれば、
+推論中断後も再学習せずに続行します。最終checkpointがない未完了の学習は最初から実行し直します。
 入力サイズやlossなどを変える場合は、新しい `--run-dir` を指定します。
 
 保存先には `config.json`、`manifest.json`、画像ごとのtrain/holdout割当を記した `split.csv`、
@@ -348,6 +351,33 @@ uv run python -m prostate archive-holdout --model unet11 --patch-size 768 \
 旧コードで固定されていなかった乱数seedは42で固定します。抽出不能なcrop条件ではエラーにして停止します。
 移植モデル9種類の出力と旧指標の数式は旧コードと照合しました。
 CPUの小規模学習で経路を確認しています。本データでの学習・0.8の再現確認は別環境で実施します。
+
+### 学習完了後に推論がOOMになった場合
+
+`archive-holdout` は全epochの学習後、holdout推論より先に `fold_0/checkpoint.pt` を保存します。
+学習が768px・batch 1で完了しても、旧条件の推論タイルは最大3000pxのため、4GB GPUでメモリ不足になることがあります。
+次のコマンドは最終checkpointを読み込み、推論タイルだけを768pxに変更して評価します。
+optimizer・学習処理・事前学習重みのダウンロードは実行しません。
+
+```bash
+uv run python -m prostate archive-evaluate \
+  --run-dir outputs/archive-unet11-768 \
+  --inference-tile-size 768 --device cuda
+```
+
+既定の保存先は `outputs/archive-unet11-768/evaluation-tile768-eval-cuda/` です。
+`--output-dir` で別の保存先も指定できます。元のcheckpoint・設定・訓練履歴・予測結果は変更しません。
+holdoutと訓練側の最終モデル評価を、同じ推論タイルサイズ・検証モードで実行します。
+
+- `evaluation_config.json`：元の学習設定、使用checkpoint、実際の推論設定。
+- `holdout/`、`holdout_images.json`、`holdout_metrics.json`：holdout予測、旧指標、クラス別IoU。
+- `fold_0/train_images.json`・`train_metrics.json`：同じ推論条件での訓練側評価。
+- 保存先直下の `train_metrics.json`：訓練側とholdoutの比較。
+
+推論タイルサイズの変更は評価条件の変更として記録します。旧3000px条件を保ってCPUで評価する場合は、
+同じコマンドに `--inference-tile-size 3000 --device cpu` を指定できます。
+`--validation-mode` を省略すると元の設定を引き継ぎます。
+最終checkpointがない場合は、学習を開始せずエラーで終了します。
 
 ### 全パッチを1epochで巡回する学習
 

@@ -48,7 +48,7 @@ def _fingerprint(checkpoint_path: Path) -> dict:
     }
 
 
-def _read_run(run_dir: Path):
+def read_run(run_dir: Path):
     settings = json.loads((run_dir / "config.json").read_text())
     manifest = json.loads((run_dir / "manifest.json").read_text())
     if tuple(manifest["classes"]) != CLASS_NAMES:
@@ -135,8 +135,31 @@ def evaluate_training_fold(
     return report
 
 
+def compare_training_heldout(training: dict, held_out: dict | None, split: str) -> dict:
+    train_mean = training["primary_case_mean"]
+    held_out_mean = held_out["primary_case_mean"] if held_out else None
+    comparison = {
+        "train_images_evaluated": training["images_evaluated"],
+        "train_cases_evaluated": training["cases_evaluated"],
+        "train_primary_case_mean": train_mean,
+        "train_pooled_pixels": training["pooled_pixels"],
+        f"{split}_primary_case_mean": held_out_mean,
+        f"{split}_pooled_pixels": held_out["pooled_pixels"] if held_out else None,
+        "foreground_macro_dice_gap": train_mean["foreground_macro_dice"]
+        - held_out_mean["foreground_macro_dice"]
+        if held_out_mean
+        and train_mean["foreground_macro_dice"] is not None
+        and held_out_mean["foreground_macro_dice"] is not None
+        else None,
+    }
+    if "archive_metrics" in training:
+        comparison["train_archive_metrics"] = training["archive_metrics"]
+        comparison[f"{split}_archive_metrics"] = held_out["archive_metrics"] if held_out else None
+    return comparison
+
+
 def collect_training_reports(run_dir: Path, output_dir: Path | None = None) -> dict:
-    settings, samples, assignments = _read_run(run_dir)
+    settings, samples, assignments = read_run(run_dir)
     destination = output_dir if output_dir is not None else run_dir
     destination.mkdir(parents=True, exist_ok=True)
     folds = {}
@@ -162,27 +185,9 @@ def collect_training_reports(run_dir: Path, output_dir: Path | None = None) -> d
             held_out = summarize_predictions(records, expected)
             if not held_out["complete"]:
                 raise ValueError(f"Incomplete saved {split} evaluation in fold {fold}")
-        train_mean = training["primary_case_mean"]
-        held_out_mean = held_out["primary_case_mean"] if held_out else None
-        folds[str(fold)] = {
-            "train_images_evaluated": training["images_evaluated"],
-            "train_cases_evaluated": training["cases_evaluated"],
-            "train_primary_case_mean": train_mean,
-            "train_pooled_pixels": training["pooled_pixels"],
-            f"{split}_primary_case_mean": held_out_mean,
-            f"{split}_pooled_pixels": held_out["pooled_pixels"] if held_out else None,
-            "foreground_macro_dice_gap": train_mean["foreground_macro_dice"]
-            - held_out_mean["foreground_macro_dice"]
-            if held_out_mean
-            and train_mean["foreground_macro_dice"] is not None
-            and held_out_mean["foreground_macro_dice"] is not None
-            else None,
-        }
-        if settings.get("training_recipe") == "archive_random_v1":
-            folds[str(fold)]["train_archive_metrics"] = training["archive_metrics"]
-            folds[str(fold)][f"{split}_archive_metrics"] = (
-                summarize_archive_metrics(records) if held_out else None
-            )
+            if settings.get("training_recipe") == "archive_random_v1":
+                held_out["archive_metrics"] = summarize_archive_metrics(records)
+        folds[str(fold)] = compare_training_heldout(training, held_out, split)
     missing = [fold for fold in evaluation_folds(settings) if str(fold) not in folds]
     summary = {
         "complete": not missing,
@@ -206,7 +211,7 @@ def evaluate_training_run(
     output_dir: Path | None = None,
 ) -> dict:
     """Backfill final training metrics from checkpoints, including older sampling schemes."""
-    settings, samples, assignments = _read_run(run_dir)
+    settings, samples, assignments = read_run(run_dir)
     available = evaluation_folds(settings)
     selected = list(available) if selected_folds is None else selected_folds
     if (
