@@ -150,8 +150,16 @@ def main(argv: list[str] | None = None):
     archive_evaluation.add_argument("--inference-tile-size", type=int)
     archive_evaluation.add_argument("--validation-mode", choices=("eval", "archive-train"))
     archive_evaluation.add_argument("--output-dir", type=Path)
-    evaluate = commands.add_parser("evaluate", help="Recompute saved CV or holdout metrics")
+    evaluate = commands.add_parser(
+        "evaluate", help="Evaluate saved fold models; infer missing archive metrics"
+    )
     evaluate.add_argument("--run-dir", type=Path, default=Config().run_dir)
+    evaluate.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
+    evaluate.add_argument(
+        "--saved-only",
+        action="store_true",
+        help="Only aggregate saved predictions and metrics; never run inference",
+    )
     training_evaluation = commands.add_parser(
         "evaluate-train",
         help="Evaluate saved fold models on their training images without training",
@@ -264,7 +272,9 @@ def main(argv: list[str] | None = None):
             else:
                 summary = run_cv(config, args.fold, args.resume)
         elif args.command == "evaluate":
-            summary = evaluate_run(args.run_dir)
+            summary = evaluate_run(
+                args.run_dir, infer_missing=not args.saved_only, requested_device=args.device
+            )
         else:
             if args.cpu_threads < 1:
                 raise ValueError("cpu_threads must be positive")

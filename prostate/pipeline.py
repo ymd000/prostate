@@ -6,27 +6,21 @@ import io
 import json
 from pathlib import Path
 
-import numpy as np
 import torch
 from tqdm import tqdm
 
-from prostate.archive_metrics import (
-    archive_prediction_current,
-    archive_prediction_metadata,
-    summarize_archive_metrics,
-)
+from prostate.archive_metrics import archive_prediction_current
 from prostate.config import ArchiveConfig, ArchiveEvaluationConfig, Config
 from prostate.data import CLASS_NAMES, Sample, prepare_dataset
+from prostate.evaluation import evaluate_prediction, evaluate_run
 from prostate.folds import (
     assign_folds,
     assign_holdout,
     evaluation_folds,
     prediction_split,
-    read_assignments,
     validate_checkpoint_split,
 )
 from prostate.inference import load_checkpoint_model, predict_sample, save_label_png
-from prostate.metrics import confusion_matrix, scores, summarize_oof, summarize_predictions
 from prostate.precision import resolve_precision
 from prostate.train import resolve_device, train_fold, train_token_fold
 from prostate.training_evaluation import (
@@ -107,66 +101,6 @@ def prepare_run(config: Config | ArchiveConfig) -> tuple[list[Sample], dict[str,
         training = [sample for sample in samples if assignment[sample.image_id] == -1]
         print(f"Training: {len(training)} images, {len({s.case_id for s in training})} cases")
     return samples, assignment
-
-
-def _evaluate_image(sample: Sample, prediction_path: Path, fold: int) -> dict:
-    target = np.load(sample.label_cache, mmap_mode="r")
-    prediction = np.load(prediction_path, mmap_mode="r")
-    matrix = confusion_matrix(target, prediction)
-    return {
-        "image_id": sample.image_id,
-        "case_id": sample.case_id,
-        "fold": fold,
-        "prediction": str(prediction_path.resolve()),
-        "confusion_matrix": matrix.tolist(),
-        **scores(matrix),
-        **archive_prediction_metadata(prediction_path),
-    }
-
-
-def evaluate_run(run_dir: Path) -> dict:
-    manifest = json.loads((run_dir / "manifest.json").read_text())
-    config = json.loads((run_dir / "config.json").read_text())
-    sample_list = [Sample(**item) for item in manifest["samples"]]
-    assignments = read_assignments(run_dir, config, sample_list)
-    samples = {sample.image_id: sample for sample in sample_list}
-    split = prediction_split(config)
-    records = []
-    for fold in evaluation_folds(config):
-        path = run_dir / f"fold_{fold}" / "evaluation.json"
-        if not path.exists():
-            continue
-        checkpoint_path = path.parent / "checkpoint.pt"
-        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-        training = [sample for key, sample in samples.items() if assignments[key] != fold]
-        validate_checkpoint_split(checkpoint, training, fold)
-        items = json.loads(path.read_text())
-        expected = {key for key, value in assignments.items() if value == fold}
-        if {item["image_id"] for item in items} != expected or len(items) != len(expected):
-            raise ValueError(f"Incomplete fold evaluation: {path}")
-        for item in items:
-            sample = samples[item["image_id"]]
-            if item["case_id"] != sample.case_id or item["fold"] != fold:
-                raise ValueError("Saved evaluation does not match the manifest")
-            prediction_path = run_dir / split / f"{sample.image_id}.npy"
-            if not prediction_path.with_suffix(".png").exists():
-                raise ValueError(f"Missing {split} PNG: {sample.image_id}")
-            records.append(_evaluate_image(sample, prediction_path, fold))
-    if split == "holdout":
-        expected = sorted(key for key, value in assignments.items() if value == 0)
-        summary = summarize_predictions(records, expected)
-        summary.update(split=split, holdout_case_id=config["holdout_case_id"])
-    else:
-        expected = sorted(samples)
-        summary = summarize_oof(records, sorted(samples), config["n_splits"])
-    if config.get("training_recipe") == "archive_random_v1" and any(
-        "archive_metrics" not in record for record in records
-    ):
-        raise ValueError("Missing archive metric sidecars; regenerate the predictions")
-    summary["archive_metrics"] = summarize_archive_metrics(records, expected)
-    write_json(run_dir / f"{split}_metrics.json", summary)
-    write_json(run_dir / f"{split}_images.json", records)
-    return summary
 
 
 def extract_run(config: Config, batch_size: int = 8):
@@ -297,7 +231,7 @@ def _run_splits(config: Config | ArchiveConfig, selected: list[int], resume: boo
             output = config.run_dir / split / f"{sample.image_id}.npy"
             labels = predict_sample(model, sample, output, config.to_dict(), device, encoder_bundle)
             save_label_png(labels, output.with_suffix(".png"))
-            records.append(_evaluate_image(sample, output, fold))
+            records.append(evaluate_prediction(sample, output, fold))
         write_json(evaluation_path, records)
         checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
         if not training_report_current(checkpoint_path, evaluation_path.parent):

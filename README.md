@@ -130,8 +130,14 @@ uv run python -m prostate cv --device cuda --fold 0
 # 完了したfoldをスキップして続行
 uv run python -m prostate cv --device cuda --resume
 
-# 保存済みOOF配列から評価を再計算
+# 評価を再計算。旧指標が未保存ならcheckpointから不足画像を再推論（再学習なし）
 uv run python -m prostate evaluate
+
+# 保存した訓練設定で旧指標を補完。訓練時の引数を指定し直す必要はない
+uv run python -m prostate evaluate --run-dir outputs/gigapath --device cuda
+
+# 保存済み予測・指標の再集計だけを行う場合
+uv run python -m prostate evaluate --run-dir outputs/gigapath --saved-only
 
 # 1画像をfoldモデルで推論（OOF用途では未学習の症例を指定する）
 uv run python -m prostate predict data/completed/15-1428_5_2_validation.jpg \
@@ -495,10 +501,16 @@ U-Net・GigaPath-Flashの現行CVでも、旧実装の `dice`・`jac`・`pdice`�
 旧実装と同じ式・平均方法ですが、旧実装のタイル分割とは異なるため、タイルサイズなどの条件を合わせて比較してください。
 訓練履歴は既存のforwardから集計し、評価用forwardを毎epoch追加することはありません。
 
-旧指標が未保存の既存CVは、**元と同じ訓練設定・保存先**で `cv --resume` を実行すると、
-保存済みcheckpointからOOFと訓練側を再推論して補完します。完了foldの再学習は行いません。
-過去のepoch履歴は復元しません。`evaluate` は保存済みの予測と指標だけを再集計するため、
-確率情報がない場合は `archive_metrics.complete: false` と不足画像を記録します。
+旧指標が未保存の既存CVは、`evaluate --run-dir 保存先 --device cuda` で補完できます。
+保存済みの設定・分割・最終checkpointを読み、不足画像だけOOF推論をやり直すため、
+訓練時の引数を指定し直す必要はありません。GigaPathの訓練用tokenキャッシュも不要です。
+旧指標まで保存済みの画像は再推論せず、未学習foldの学習も開始しません。
+checkpointがないfoldは未評価として残ります。訓練設定・重み・epoch履歴は変更しません。
+訓練側の旧指標は `evaluate-train`、または元と同じ訓練設定で `cv --resume` を実行すると補完できます。
+
+`evaluate --saved-only` は保存済みの予測と指標だけを再集計します。
+argmax後の予測ラベルだけから旧 `jac`・`dice` は復元できないため、確率情報がない場合は
+`archive_metrics.complete: false` と不足画像を記録します。過去のepoch履歴は復元しません。
 
 ### 学習lossが非有限値になった場合
 
@@ -644,7 +656,8 @@ PNGは可逆圧縮なので、JPEGへの変更自体で細部は増えません�
 学習と推論のAMP精度の選択は `precision.py` にまとめています。
 訓練foldからのクラス重み計算とCEの設定保存は `loss.py` で行います。
 凍結encoderの特徴抽出は `extractor.py`、特徴からの訓練パッチ読込は `token_data.py`、
-epochごとの指標記録は `training_history.py`、最終モデルの訓練側評価は `training_evaluation.py` です。
+epochごとの指標記録は `training_history.py`、最終モデルの訓練側評価は `training_evaluation.py`、
+OOF・holdoutの再集計と旧指標の補完は `evaluation.py` です。
 OOFの比較画像は `thumbnails.py` で生成します。
 
 ```bash

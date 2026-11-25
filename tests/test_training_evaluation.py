@@ -254,3 +254,116 @@ def test_cv_automatically_evaluates_training_split_and_resume_backfills_without_
     (config.run_dir / "fold_0/checkpoint.pt").unlink()
     with pytest.raises(FileNotFoundError, match="Cannot resume completed fold"):
         run_cv(config, resume=True)
+
+
+@pytest.mark.parametrize("architecture", ["unet_v1", "unet_groupnorm_v2", "token_decoder_v1"])
+def test_evaluate_cli_infers_missing_soft_scores_without_training_or_repeating_complete_images(
+    tmp_path, monkeypatch, capsys, architecture
+):
+    from prostate import evaluation
+
+    config, samples, _ = make_run(tmp_path, architecture)
+    previous = evaluate_run(config.run_dir)
+    originals = {
+        path: path.read_bytes()
+        for pattern in ("config.json", "manifest.json", "folds.csv", "checkpoint.pt", "history.csv")
+        for path in config.run_dir.rglob(pattern)
+    }
+    calls, encoder_loads = [], []
+    predict, load_model = evaluation.predict_sample, evaluation.load_checkpoint_model
+
+    def capture(model, sample, *args):
+        calls.append(sample.image_id)
+        return predict(model, sample, *args)
+
+    def encoder(device):
+        encoder_loads.append(device)
+        return FakeFrozenEncoder(), [0, 0, 0], [1, 1, 1]
+
+    def fail(*args, **kwargs):
+        pytest.fail("Evaluation must not train or repeat completed inference")
+
+    monkeypatch.setattr(evaluation, "predict_sample", capture)
+    monkeypatch.setattr("prostate.extractor.load_gigapath_flash", encoder)
+    monkeypatch.setattr("prostate.pipeline.train_fold", fail)
+    monkeypatch.setattr("prostate.pipeline.train_token_fold", fail)
+    monkeypatch.setattr(torch.optim, "AdamW", fail)
+    command = ["evaluate", "--run-dir", str(config.run_dir), "--device", "cpu"]
+    capsys.readouterr()
+    main(command)
+    stdout = capsys.readouterr().out
+    result = json.loads(stdout[stdout.index("{") :])
+    old = result["archive_metrics"]
+    assert result["complete"] and old["complete"]
+    assert result["primary_case_mean"] == previous["primary_case_mean"]
+    assert old["images_evaluated"] == len(samples) == len(calls)
+    assert old["missing_image_ids"] == [] and set(old["fold_image_means"]) == {"0", "1"}
+    assert len(encoder_loads) == (1 if architecture == "token_decoder_v1" else 0)
+    # Fixed logits [0,0,0,0,1]; one red mask and two masks of other classes.
+    probability = np.exp(1) / (np.exp(1) + 4)
+    soft = [399 * probability, 399 / (np.exp(1) + 4), 399 / (np.exp(1) + 4)]
+    assert old["image_mean"]["jac"] == pytest.approx(
+        np.mean([(s + 1) / (798 - s + 1) for s in soft])
+    )
+    for path, before in originals.items():
+        assert path.read_bytes() == before
+
+    monkeypatch.setattr(evaluation, "predict_sample", fail)
+    monkeypatch.setattr(evaluation, "load_checkpoint_model", fail)
+    main(command)
+    stdout = capsys.readouterr().out
+    assert json.loads(stdout[stdout.index("{") :]) == result
+    missing = samples[0]
+    (config.run_dir / "oof" / f"{missing.image_id}.archive_metrics.json").unlink()
+    calls.clear()
+    monkeypatch.setattr(evaluation, "predict_sample", capture)
+    monkeypatch.setattr(evaluation, "load_checkpoint_model", load_model)
+    main(command)
+    assert calls == [missing.image_id]
+
+
+def test_evaluate_saved_only_keeps_missing_metrics_without_loading_models(
+    tmp_path, monkeypatch, capsys
+):
+    config, samples, _ = make_run(tmp_path)
+    monkeypatch.setattr(
+        "prostate.evaluation.load_checkpoint_model", lambda *a: pytest.fail("No inference")
+    )
+    capsys.readouterr()
+    main(["evaluate", "--run-dir", str(config.run_dir), "--saved-only"])
+    result = json.loads(capsys.readouterr().out)
+    assert result["complete"] and not result["archive_metrics"]["complete"]
+    assert result["archive_metrics"]["images_evaluated"] == 0
+    assert len(result["archive_metrics"]["missing_image_ids"]) == len(samples)
+
+
+def test_evaluate_recovers_after_incomplete_inference_and_keeps_untrained_folds_missing(tmp_path):
+    config, samples, assignments = make_run(tmp_path)
+    (config.run_dir / "fold_0/evaluation.json").unlink()
+    (config.run_dir / "fold_1/evaluation.json").unlink()
+    (config.run_dir / "fold_1/checkpoint.pt").unlink()
+    for path in (config.run_dir / "oof").iterdir():
+        path.unlink()
+    result = evaluate_run(config.run_dir, infer_missing=True, requested_device="cpu")
+    missing = sorted(sample.image_id for sample in samples if assignments[sample.image_id] == 1)
+    assert not result["complete"] and not result["archive_metrics"]["complete"]
+    assert result["archive_metrics"]["missing_image_ids"] == missing
+    assert (config.run_dir / "fold_0/evaluation.json").is_file()
+    assert not (config.run_dir / "fold_1/checkpoint.pt").exists()
+
+
+@pytest.mark.parametrize("problem", ["train_case_ids", "config"])
+def test_evaluate_rejects_inconsistent_checkpoint_before_inference(tmp_path, monkeypatch, problem):
+    config, _, _ = make_run(tmp_path)
+    path = config.run_dir / "fold_0/checkpoint.pt"
+    checkpoint = torch.load(path, weights_only=True)
+    if problem == "config":
+        checkpoint["config"]["halo"] = 0
+    else:
+        checkpoint[problem].append("heldout")
+    torch.save(checkpoint, path)
+    monkeypatch.setattr(
+        "prostate.evaluation.load_checkpoint_model", lambda *a: pytest.fail("Must validate first")
+    )
+    with pytest.raises(ValueError, match="Checkpoint"):
+        evaluate_run(config.run_dir, infer_missing=True, requested_device="cpu")
