@@ -33,4 +33,4 @@ htmlcov/
 .vscode/
 
 # temporary
-.tar.gz
+*.tar.gz
