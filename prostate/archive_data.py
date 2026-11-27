@@ -74,12 +74,14 @@ class ArchivePatchDataset(Dataset):
     def __getitem__(self, index):
         rng = np.random.default_rng(np.random.SeedSequence([self.config.seed, self.epoch, index]))
         side = self.config.patch_size
+        step = self.config.crop_start_step
         for _ in range(self.config.max_sampling_attempts):
             number = int(rng.choice(len(self.samples), p=self.probabilities))
             sample = self.samples[number]
-            # Match the old exclusive upper bound; the last possible start is not drawn.
-            left = int(rng.integers(sample.width - side))
-            top = int(rng.integers(sample.height - side))
+            # Draw uniformly from grid-aligned starts within the old exclusive
+            # bounds. Step 1 preserves the original RNG calls and crop sequence.
+            left = int(rng.integers((sample.width - side - 1) // step + 1)) * step
+            top = int(rng.integers((sample.height - side - 1) // step + 1)) * step
             if np.any(_nonzero_mask(self.mask_paths[number])[top : top + side, left : left + side]):
                 break
         else:

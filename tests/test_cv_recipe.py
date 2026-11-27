@@ -48,6 +48,7 @@ def command(config):
         "batch_size",
         "epochs",
         "samples_multiplier",
+        "crop_start_step",
         "inference_tile_size",
         "device",
         "num_workers",
@@ -145,6 +146,19 @@ def test_cv_recipe_prepare_uses_the_same_case_folds_as_current_cv(cv_config, mon
         cv_config.run_dir / "folds.csv"
     ).read_bytes()
     assert "15-1428_1_validation" in expected
+    assert settings.get("crop_start_step", 1) == 1
+    coarse = replace(cv_config, crop_start_step=16, run_dir=cv_config.run_dir.parent / "coarse")
+    main(command(coarse) + ["--prepare-only", "--device", "cuda"])
+    coarse_settings = json.loads((coarse.run_dir / "config.json").read_text())
+    assert coarse_settings["crop_start_step"] == 16
+    assert (coarse.run_dir / "folds.csv").read_bytes() == (
+        cv_config.run_dir / "folds.csv"
+    ).read_bytes()
+    assert (coarse.run_dir / "manifest.json").read_bytes() == (
+        cv_config.run_dir / "manifest.json"
+    ).read_bytes()
+    with pytest.raises(ValueError, match="Experiment differs"):
+        prepare_run(replace(coarse, crop_start_step=1, device="cuda"))
     with pytest.raises(ValueError, match="Experiment differs"):
         prepare_run(replace(cv_config, batch_size=8, device="cuda"))
 
@@ -159,11 +173,14 @@ class TinyUNet(nn.Module):
         return self.head(self.bn(inputs))
 
 
+@pytest.mark.parametrize("crop_step", [1, 16])
 def test_cv_recipe_trains_independent_folds_and_saves_oof_and_training_metrics(
     cv_config,
     monkeypatch,
     capsys,
+    crop_step,
 ):
+    cv_config = replace(cv_config, crop_start_step=crop_step)
     initialized = []
 
     def create(model_name="unet11", num_classes=5, pretrained=True, **kwargs):
@@ -194,6 +211,7 @@ def test_cv_recipe_trains_independent_folds_and_saves_oof_and_training_metrics(
         held_out = [r for r in records if r["fold"] == fold]
         assert not set(checkpoint["train_case_ids"]) & {r["case_id"] for r in held_out}
         assert checkpoint["config"] == cv_config.to_dict()
+        assert checkpoint["crop_start_step"] == crop_step
         assert checkpoint["precision"] == "torch.float32"
         assert checkpoint["optimizer"] == {"name": "SGD", "momentum": 0.9, "weight_decay": 0.0}
         assert checkpoint["loss"]["class_weights"] is None

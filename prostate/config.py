@@ -107,6 +107,7 @@ class ArchiveConfig:
     lr_decay: float = 0.95
     samples_multiplier: int = 8
     max_sampling_attempts: int = 10000
+    crop_start_step: int = 1
     inference_tile_size: int = 3000
     validation_mode: str = "eval"
     seed: int = 42
@@ -135,6 +136,7 @@ class ArchiveConfig:
             "epochs",
             "samples_multiplier",
             "max_sampling_attempts",
+            "crop_start_step",
             "inference_tile_size",
             "cpu_threads",
         ):
@@ -161,6 +163,9 @@ class ArchiveConfig:
 
     def to_dict(self) -> dict:
         result = asdict(self)
+        # Missing in historical configurations means the original 1px sampling.
+        if self.crop_start_step == 1:
+            del result["crop_start_step"]
         if self.holdout_case_id is None:
             del result["holdout_case_id"]
         else:

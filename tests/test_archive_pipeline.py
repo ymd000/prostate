@@ -116,6 +116,7 @@ def test_archive_sgd_training_holdout_metrics_resume_and_prediction(archive_conf
     assert checkpoint["precision"] == "torch.float32"
     assert checkpoint["optimizer"] == {"name": "SGD", "momentum": 0.9, "weight_decay": 0.0}
     assert checkpoint["patches_per_epoch"] == 2 and checkpoint["batches_per_epoch"] == 1
+    assert checkpoint["crop_start_step"] == 1
     assert checkpoint["loss"]["class_counts"]["GP5"] == 0
     assert checkpoint["loss"]["class_weights"] is None
     assert checkpoint["loss"]["implementation"] == "softmax_add_1e-24_log_nll"
@@ -166,6 +167,8 @@ def test_archive_sgd_training_holdout_metrics_resume_and_prediction(archive_conf
         {"lr_decay": 0},
         {"samples_multiplier": 0},
         {"max_sampling_attempts": 0},
+        {"crop_start_step": 0},
+        {"crop_start_step": -1},
         {"inference_tile_size": 0},
         {"validation_mode": "invalid"},
     ],

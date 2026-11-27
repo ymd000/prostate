@@ -95,6 +95,12 @@ def _archive_arguments(parser: argparse.ArgumentParser, include_holdout: bool = 
     parser.add_argument(
         "--batch-size", type=int, default=None, help="Default: 256px=32, 512px=8, 768px=4"
     )
+    parser.add_argument(
+        "--crop-start-step",
+        type=int,
+        default=defaults.crop_start_step,
+        help="Random crop start-coordinate spacing in pixels (default: 1; use 16 for token alignment)",
+    )
     for name in ("learning_rate", "momentum", "lr_decay"):
         parser.add_argument(
             f"--{name.replace('_', '-')}", type=float, default=getattr(defaults, name)

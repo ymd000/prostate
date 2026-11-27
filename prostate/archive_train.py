@@ -98,6 +98,7 @@ def train_archive_fold(
         "precision": "torch.float32",
         "patches_per_epoch": len(dataset),
         "batches_per_epoch": len(loader),
+        "crop_start_step": config.crop_start_step,
         "history_metrics_protocol": ONLINE_PROTOCOL,
         "optimizer": {"name": "SGD", "momentum": config.momentum, "weight_decay": 0.0},
         "scheduler": {"name": "LambdaLR", "factor_per_epoch": config.lr_decay},

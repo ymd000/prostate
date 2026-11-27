@@ -397,6 +397,35 @@ holdoutとは訓練症例数が異なるため、同じ抽出係数・epoch数�
 旧指標の再取得には `evaluate`、訓練側の再評価には `evaluate-train` を使えます。
 詳細な引数は `uv run python -m prostate cv --recipe archive --help` で確認できます。
 
+### 256px cropの開始位置を1px刻み・16px刻みで比較する
+
+GigaPathとの融合に先立ち、UNet単独でcrop位置の制限による影響を調べます。
+`--crop-start-step` は開始位置の刻み幅です。既定の `1` は従来の1px単位、
+`16` は元画像の左上を原点とした16px単位で、候補位置からランダムに抽出します。
+cropの大きさは両方とも256×256pxのままです。画像の縮小や16×16pxへのcropは行いません。
+
+```bash
+for crop_step in 1 16; do
+  uv run python -m prostate cv --recipe archive --model unet16 \
+    --patch-size 256 --batch-size 32 --crop-start-step "$crop_step" \
+    --epochs 30 --learning-rate 0.01 --momentum 0.9 --lr-decay 0.95 \
+    --samples-multiplier 8 --n-splits 5 --seed 42 --device cuda \
+    --inference-tile-size 256 --validation-mode eval \
+    --run-dir "outputs/unet16-256-crop-step${crop_step}" || break
+done
+```
+
+この例ではモデル、事前学習、batch、抽出数、拡張、loss、optimizer、epoch数、fold、
+推論条件を共通にし、訓練cropの開始位置だけを変更します。推論は両方とも最大256pxの均等分割です。
+開始位置は各軸で `0, step, 2*step, ...` から選び、旧実装と同じ排他的上限（画像幅・高さから
+cropサイズを引いた値未満）を保ちます。抽出数の計算式・画像の選択確率は同じです。
+
+ログとcheckpointの `crop_start_step` に刻み幅を記録します。16px条件は `config.json` にも
+保存し、省略された従来の設定は1px条件として扱うため、既存の1px実験を同じ条件で再開できます。
+刻み幅の変更には新しい保存先を使います。再開時は同じコマンドに `--resume` を加えてください。
+比較には各保存先の `oof_metrics.json` の症例平均foreground macro IoU、全5クラスのIoU、
+fold別成績を使います。16px条件の有効性は本比較で確認する対象です。
+
 ### 学習完了後に推論がOOMになった場合
 
 `archive-holdout` は全epochの学習後、holdout推論より先に `fold_0/checkpoint.pt` を保存します。

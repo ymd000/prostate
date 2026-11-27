@@ -46,12 +46,13 @@ def cached_sample(folder, name, height, width, empty=False):
     )
 
 
-def test_random_crop_count_probabilities_replay_and_label_alignment(tmp_path):
+@pytest.mark.parametrize("step", [1, 16])
+def test_random_crop_count_probabilities_replay_and_label_alignment(tmp_path, step):
     samples = [
         cached_sample(tmp_path / "A", "A_1", 131, 195),
         cached_sample(tmp_path / "B", "B_1", 85, 90),
     ]
-    config = ArchiveConfig(patch_size=64, batch_size=2, num_workers=0)
+    config = ArchiveConfig(patch_size=64, batch_size=2, num_workers=0, crop_start_step=step)
     dataset = ArchivePatchDataset(samples, config)
     assert len(dataset) == sum(int((s.height / 64) * (s.width / 64)) for s in samples) * 8
     expected = np.sqrt([(s.height - 64) * (s.width - 64) for s in samples])
@@ -72,6 +73,45 @@ def test_random_crop_count_probabilities_replay_and_label_alignment(tmp_path):
     first = [dataset[index][1] for index in range(8)]
     dataset.epoch = 1
     assert any(not torch.equal(first[index], dataset[index][1]) for index in range(8))
+
+
+@pytest.mark.parametrize("step", [1, 16])
+@pytest.mark.parametrize("extra_height,extra_width", [(35, 49), (16, 17), (1, 1)])
+def test_crop_start_grid_keeps_exact_rgb_label_coordinates_and_exclusive_bounds(
+    tmp_path, step, extra_height, extra_width
+):
+    side = 64
+    sample = cached_sample(tmp_path, "A_1", side + extra_height, side + extra_width)
+    rows, columns = np.indices((sample.height, sample.width))
+    labels = (rows + columns) % 5
+    # Recover the original coordinates even after rotation/flip and BGR normalization.
+    np.save(sample.rgb_cache, np.stack((columns, rows, labels * 40), axis=-1).astype(np.uint8))
+    dataset = ArchivePatchDataset(
+        [sample], ArchiveConfig(patch_size=side, samples_multiplier=128, crop_start_step=step)
+    )
+    starts = set()
+    for index in range(len(dataset)):
+        image, target = dataset[index]
+        bgr = torch.round(
+            (
+                image * image.new_tensor(IMAGENET_STD)[:, None, None]
+                + image.new_tensor(IMAGENET_MEAN)[:, None, None]
+            )
+            * 255
+        ).long()
+        left, top = int(bgr[2].min()), int(bgr[1].min())
+        starts.add((left, top))
+        assert image.shape == (3, side, side) and target.shape == (side, side)
+        assert 0 <= left < extra_width and 0 <= top < extra_height
+        assert left % step == top % step == 0
+        torch.testing.assert_close(target, (bgr[2] + bgr[1]) % 5)
+        torch.testing.assert_close(target, bgr[0] // 40)
+    if step == 16:
+        assert starts == {
+            (x, y) for x in range(0, extra_width, 16) for y in range(0, extra_height, 16)
+        }
+    elif min(extra_height, extra_width) > 1:
+        assert any(left % 16 or top % 16 for left, top in starts)
 
 
 def test_archived_input_preserves_bgr_channel_order():

@@ -50,7 +50,9 @@ def training_loader(
         generator=torch.Generator().manual_seed(config.seed + fold),
     )
     sampling = (
-        "archive random crops" if config.patch_sampling == "archive_random_v1" else "full grid"
+        f"archive random crops (start step {config.crop_start_step}px)"
+        if config.patch_sampling == "archive_random_v1"
+        else "full grid"
     )
     print(f"Fold {fold}: {sampling}, {len(dataset)} patches/epoch, {len(loader)} batches/epoch")
     return loader
